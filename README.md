@@ -14,13 +14,16 @@ Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs
 
 Enable CodeQL on the repo you want to scan. Update the workflow to scan all branches:
 
-```yaml
+1. Repo -> Settings -> Advanced Security 
+2. Find Code scanning → CodeQL analysis and click three dots -> Switch to advanced
+3. Update codeql.yml
+```yml
 on:
   push:
     branches: ['**']
 ```
 
-Create branches from `main` for each tool:
+Create branches from `main` for each tool (examples here are for tomcat):
 
 ```bash
 git checkout main
@@ -32,6 +35,7 @@ git checkout -b tomcat-anthropic && git push origin tomcat-anthropic
 ```
 
 ### 2. Create a GitHub PAT
+Go to: [https://github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
 
 Fine-grained PAT with these permissions on the target repo:
 - **Code scanning alerts**: Read
@@ -78,7 +82,7 @@ Open http://localhost:3000. Click "Run New Scan" to fetch CodeQL alerts.
 
 ### Prerequisites
 
-- AWS CLI configured with profile `watate` (or change in `infra/terraform/variables.tf`)
+- AWS CLI configured with your profile (or change in `infra/terraform/variables.tf`)
 - SSH key pair for EC2
 - Devin GitHub App installed on target repo (for Devin API access)
 
