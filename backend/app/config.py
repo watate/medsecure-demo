@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     branch_copilot: str = "tomcat-copilot"
     branch_anthropic: str = "tomcat-anthropic"
     branch_openai: str = "tomcat-openai"
+    branch_gemini: str = "tomcat-gemini"
 
     # Devin API
     devin_api_key: str = ""
@@ -22,6 +23,9 @@ class Settings(BaseSettings):
 
     # OpenAI API
     openai_api_key: str = ""
+
+    # Google Gemini API
+    gemini_api_key: str = ""
 
     # Database
     database_path: str = "medsecure.db"

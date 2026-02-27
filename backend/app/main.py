@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="MedSecure API",
-    description="CodeQL remediation comparison platform — Devin vs Copilot Autofix vs Anthropic vs OpenAI",
+    description="CodeQL remediation comparison platform — Devin vs Copilot Autofix vs Anthropic vs OpenAI vs Gemini",
     version="0.1.0",
     lifespan=lifespan,
 )

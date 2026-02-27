@@ -21,6 +21,9 @@ _ANTHROPIC_OUTPUT_COST_PER_MTOK = 25.0
 # OpenAI gpt-5.3-codex
 _OPENAI_INPUT_COST_PER_MTOK = 1.75
 _OPENAI_OUTPUT_COST_PER_MTOK = 14.0
+# Google gemini-3.1-pro-preview (prompts <= 200k tokens)
+_GEMINI_INPUT_COST_PER_MTOK = 2.0
+_GEMINI_OUTPUT_COST_PER_MTOK = 12.0
 
 # Rough estimate: ~1500 input tokens per alert (code context + rule description)
 _ESTIMATED_INPUT_TOKENS_PER_ALERT = 1500
@@ -40,6 +43,10 @@ def _estimate_api_cost(tool_name: str, alerts_processed: int) -> dict | None:
         input_cost_per_mtok = _OPENAI_INPUT_COST_PER_MTOK
         output_cost_per_mtok = _OPENAI_OUTPUT_COST_PER_MTOK
         model = "gpt-5.3-codex"
+    elif tool_name == "gemini":
+        input_cost_per_mtok = _GEMINI_INPUT_COST_PER_MTOK
+        output_cost_per_mtok = _GEMINI_OUTPUT_COST_PER_MTOK
+        model = "gemini-3.1-pro-preview"
     else:
         return None
 
@@ -108,6 +115,8 @@ def generate_ciso_report(
             automation = "requires patch review and application (claude-opus-4-6)"
         elif tool_name == "openai":
             automation = "requires patch review and application (gpt-5.3-codex)"
+        elif tool_name == "gemini":
+            automation = "requires patch review and application (gemini-3.1-pro-preview)"
 
         perf: dict = {
             "total_fixed": total_fixed,
@@ -245,6 +254,8 @@ def generate_cto_report(
             human_intervention = "patch review and application (claude-opus-4-6)"
         elif tool_name == "openai":
             human_intervention = "patch review and application (gpt-5.3-codex)"
+        elif tool_name == "gemini":
+            human_intervention = "patch review and application (gemini-3.1-pro-preview)"
 
         entry: dict = {
             "total_fixed": total_fixed,

@@ -11,6 +11,7 @@ const TOOL_LABELS: Record<string, string> = {
   copilot: "Copilot Autofix",
   anthropic: "Anthropic (claude-opus-4-6)",
   openai: "OpenAI (gpt-5.3-codex)",
+  gemini: "Gemini (gemini-3.1-pro-preview)",
 };
 
 function SeverityDot({ color }: { color: string }) {
@@ -153,7 +154,7 @@ function CISOReport({ data }: { data: ReportData }) {
           <CardDescription>How each tool reduced alerts by severity level</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(severityBA).map(([tool, severities]) => {
               const s = severities as Record<string, Record<string, number>>;
               return (
@@ -273,7 +274,7 @@ function CTOReport({ data }: { data: ReportData }) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-6 sm:grid-cols-5">
             <div>
               <p className="text-3xl font-bold">{exec.baseline_open_alerts ?? 0}</p>
               <p className="text-xs text-muted-foreground">Open Alerts</p>
@@ -364,7 +365,7 @@ function CTOReport({ data }: { data: ReportData }) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(roiAnalysis.tools || {}).map(([tool, info]) => {
               const r = info as Record<string, number>;
               return (
@@ -397,7 +398,7 @@ function CTOReport({ data }: { data: ReportData }) {
           <CardTitle>Security Backlog Impact</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(backlog).map(([tool, info]) => {
               const b = info as Record<string, number>;
               return (

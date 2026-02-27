@@ -203,6 +203,7 @@ async def seed_demo_data() -> dict:
             ("copilot", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
             ("anthropic", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
             ("openai", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
+            ("gemini", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
 
             # === Devin (fast, fully automated) ===
             ("devin", "session_created", "Devin session started for CWE-89 SQL Injection", 12, 2000),
@@ -276,6 +277,24 @@ async def seed_demo_data() -> dict:
             ("openai", "remediation_complete",
              "32/47 alerts fixed (68.1%). 4 patches failed CodeQL verification.",
              None, 2400000),
+
+            # === Gemini (API-based — gemini-3.1-pro-preview) ===
+            ("gemini", "api_call_sent", "Sending alert context to gemini-3.1-pro-preview", 12, 3500),
+            ("gemini", "patch_generated", "gemini-3.1-pro-preview generated fix for SQL Injection", 12, 11000),
+            ("gemini", "patch_applied", "Patch applied to tomcat-gemini branch", 12, 15000),
+            ("gemini", "codeql_verified", "Alert #12 resolved", 12, 58000),
+
+            ("gemini", "api_call_sent", "Sending alert context for XSS to gemini-3.1-pro-preview", 15, 12000),
+            ("gemini", "patch_generated", "gemini-3.1-pro-preview generated fix for XSS vulnerability", 15, 22000),
+            ("gemini", "patch_applied", "Patch applied", 15, 26000),
+            ("gemini", "codeql_verified", "Alert #15 resolved", 15, 70000),
+
+            ("gemini", "batch_complete", "Batch 1: 12 fixes applied in 4 min", None, 240000),
+            ("gemini", "batch_complete", "Batch 2: 11 fixes applied in 10 min", None, 600000),
+            ("gemini", "batch_complete", "Batch 3: 9 fixes applied in 22 min", None, 1320000),
+            ("gemini", "remediation_complete",
+             "32/47 alerts fixed (68.1%). 3 patches failed CodeQL verification.",
+             None, 2200000),
         ]
 
         for tool, event_type, detail, alert_num, offset_ms in demo_events:

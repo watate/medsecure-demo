@@ -11,6 +11,7 @@ const TOOL_COLORS: Record<string, string> = {
   copilot: "bg-blue-500",
   anthropic: "bg-orange-500",
   openai: "bg-violet-500",
+  gemini: "bg-pink-500",
 };
 
 const TOOL_TEXT_COLORS: Record<string, string> = {
@@ -18,6 +19,7 @@ const TOOL_TEXT_COLORS: Record<string, string> = {
   copilot: "text-blue-600",
   anthropic: "text-orange-600",
   openai: "text-violet-600",
+  gemini: "text-pink-600",
 };
 
 const TOOL_BORDER_COLORS: Record<string, string> = {
@@ -25,6 +27,7 @@ const TOOL_BORDER_COLORS: Record<string, string> = {
   copilot: "border-blue-500",
   anthropic: "border-orange-500",
   openai: "border-violet-500",
+  gemini: "border-pink-500",
 };
 
 const TOOL_LABELS: Record<string, string> = {
@@ -32,6 +35,7 @@ const TOOL_LABELS: Record<string, string> = {
   copilot: "Copilot Autofix",
   anthropic: "Anthropic (claude-opus-4-6)",
   openai: "OpenAI (gpt-5.3-codex)",
+  gemini: "Gemini (gemini-3.1-pro-preview)",
 };
 
 const EVENT_ICONS: Record<string, string> = {
