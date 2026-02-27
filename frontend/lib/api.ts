@@ -128,12 +128,18 @@ export interface ReplayRunWithEvents extends ReplayRun {
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
       ...options?.headers,
     },
   });
   if (!res.ok) {
+    // Redirect to login on 401 (invalid/expired session)
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.location.href = "/login";
+      throw new Error("Session expired");
+    }
     const error = await res.text();
     throw new Error(`API error ${res.status}: ${error}`);
   }
