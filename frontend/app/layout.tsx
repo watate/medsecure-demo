@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import Image from "next/image";
 import Link from "next/link";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
@@ -21,9 +22,7 @@ export default function RootLayout({
         <nav className="border-b border-border bg-card">
           <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3">
             <Link href="/" className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground text-sm font-bold">
-                MS
-              </div>
+              <Image src="/logo.png" alt="MedSecure Logo" width={32} height={32} className="rounded-md" />
               <span className="text-lg font-semibold">MedSecure</span>
             </Link>
             <div className="flex items-center gap-6">
