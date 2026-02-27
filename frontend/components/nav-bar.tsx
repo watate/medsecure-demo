@@ -45,15 +45,13 @@ export function NavBar() {
             Replay
           </Link>
           {session?.user && (
-            <>
-              <span className="text-xs text-muted-foreground">
-                {session.user.email}
-              </span>
-              <Button variant="outline" size="sm" onClick={handleSignOut}>
-                Sign out
-              </Button>
-            </>
+            <span className="text-xs text-muted-foreground">
+              {session.user.email}
+            </span>
           )}
+          <Button variant="outline" size="sm" onClick={handleSignOut}>
+            Sign out
+          </Button>
         </div>
       </div>
     </nav>
