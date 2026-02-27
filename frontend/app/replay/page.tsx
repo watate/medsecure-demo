@@ -35,7 +35,7 @@ const TOOL_LABELS: Record<string, string> = {
   copilot: "Copilot Autofix",
   anthropic: "Anthropic (claude-opus-4-6)",
   openai: "OpenAI (gpt-5.3-codex)",
-  gemini: "Gemini (gemini-3.1-pro-preview)",
+  gemini: "Google (gemini-3.1-pro-preview)",
 };
 
 const EVENT_ICONS: Record<string, string> = {

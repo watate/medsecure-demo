@@ -21,7 +21,7 @@ const TOOLS = [
   { key: "copilot", label: "Copilot" },
   { key: "anthropic", label: "Anthropic" },
   { key: "openai", label: "OpenAI" },
-  { key: "gemini", label: "Gemini" },
+  { key: "gemini", label: "Google" },
 ];
 
 const STATE_OPTIONS = [
