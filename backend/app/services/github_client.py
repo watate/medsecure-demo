@@ -52,7 +52,7 @@ class GitHubClient:
                             number=item["number"],
                             rule_id=rule.get("id", ""),
                             rule_description=rule.get("description", ""),
-                            severity=rule.get("security_severity_level", rule.get("severity", "note")),
+                            severity=rule.get("security_severity_level") or rule.get("severity") or "note",
                             state=item.get("state", "open"),
                             tool=item.get("tool", {}).get("name", "CodeQL"),
                             file_path=location.get("path", ""),
