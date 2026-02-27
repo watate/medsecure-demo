@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # Pull secrets from SSM into .env
 aws ssm get-parameters-by-path \

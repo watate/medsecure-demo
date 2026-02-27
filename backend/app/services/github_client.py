@@ -72,21 +72,29 @@ class GitHubClient:
 
         return alerts
 
+    def compute_branch_summary(self, alerts: list[Alert], branch: str, tool_name: str) -> BranchSummary:
+        """Compute a summary from a pre-fetched list of alerts."""
+        return self._build_summary(alerts, branch, tool_name)
+
     async def get_branch_summary(self, branch: str, tool_name: str) -> BranchSummary:
-        """Get a summary of alerts for a branch."""
+        """Get a summary of alerts for a branch (fetches alerts internally)."""
         alerts = await self.get_alerts(branch)
+        return self._build_summary(alerts, branch, tool_name)
+
+    @staticmethod
+    def _build_summary(alerts: list[Alert], branch: str, tool_name: str) -> BranchSummary:
 
         severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "other": 0}
         state_counts = {"open": 0, "fixed": 0, "dismissed": 0}
 
-        for alert in alerts:
-            sev = alert.severity.lower() if alert.severity else "other"
+        for a in alerts:
+            sev = a.severity.lower() if a.severity else "other"
             if sev in severity_counts:
                 severity_counts[sev] += 1
             else:
                 severity_counts["other"] += 1
 
-            st = alert.state.lower()
+            st = a.state.lower()
             if st in state_counts:
                 state_counts[st] += 1
 

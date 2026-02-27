@@ -48,8 +48,8 @@ async def trigger_scan() -> TriggerScanResponse:
 
         for tool_name, branch in branch_map.items():
             try:
-                summary = await github.get_branch_summary(branch, tool_name)
                 alerts = await github.get_alerts(branch)
+                summary = github.compute_branch_summary(alerts, branch, tool_name)
 
                 await db.execute(
                     """INSERT INTO scan_branches
@@ -220,7 +220,7 @@ async def compare_latest() -> ComparisonResult:
 
     tools = {k: v for k, v in scan.branches.items() if k != "baseline"}
 
-    improvements: dict[str, dict[str, int]] = {}
+    improvements: dict[str, dict[str, int | float]] = {}
     for tool_name, tool_summary in tools.items():
         improvements[tool_name] = {
             "total_fixed": baseline.open - tool_summary.open,
@@ -228,7 +228,7 @@ async def compare_latest() -> ComparisonResult:
             "high_fixed": baseline.high - tool_summary.high,
             "medium_fixed": baseline.medium - tool_summary.medium,
             "low_fixed": baseline.low - tool_summary.low,
-            "fix_rate_pct": round((1 - tool_summary.open / baseline.open) * 100, 1) if baseline.open > 0 else 0,
+            "fix_rate_pct": round((1 - tool_summary.open / baseline.open) * 100, 1) if baseline.open > 0 else 0.0,
         }
 
     return ComparisonResult(

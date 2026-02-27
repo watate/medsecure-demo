@@ -77,7 +77,7 @@ class ComparisonResult(BaseModel):
     scanned_at: str
     baseline: BranchSummary
     tools: dict[str, BranchSummary]
-    improvements: dict[str, dict[str, int]]
+    improvements: dict[str, dict[str, int | float]]
 
 
 class RemediationRequest(BaseModel):
