@@ -91,42 +91,54 @@ export default function AlertsPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cacheRef = useRef<AlertsCache>({});
+  const requestIdRef = useRef(0);
   const [alerts, setAlerts] = useState<AlertsResponse | null>(null);
 
   const cacheKey = `${selectedTool}:${stateFilter}`;
 
-  const loadAlerts = useCallback(async (tool: string, state: string, useCache: boolean) => {
-    const key = `${tool}:${state}`;
-
-    // Show cached data immediately if available
-    if (useCache && cacheRef.current[key]) {
-      setAlerts(cacheRef.current[key]);
-    }
-
+  // Shared fetch function guarded by requestIdRef to prevent race conditions.
+  // Both useEffect and forceRefresh increment the ID before firing; callbacks
+  // only update state if their captured ID still matches the current ref value.
+  const fetchAlerts = useCallback((tool: string, state: string, key: string) => {
+    const id = ++requestIdRef.current;
     setLoading(true);
     setError(null);
-    try {
-      const apiState = state === "all" ? undefined : state;
-      const data = await api.getLiveAlerts(tool, apiState);
-      cacheRef.current[key] = data;
-      setAlerts(data);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Failed to load alerts";
-      if (!cacheRef.current[key]) {
-        setError(msg);
-      }
-    } finally {
-      setLoading(false);
-    }
+
+    const apiState = state === "all" ? undefined : state;
+    api.getLiveAlerts(tool, apiState)
+      .then((data) => {
+        cacheRef.current[key] = data;
+        if (requestIdRef.current === id) setAlerts(data);
+      })
+      .catch((e) => {
+        if (requestIdRef.current === id) {
+          const msg = e instanceof Error ? e.message : "Failed to load alerts";
+          if (!cacheRef.current[key]) {
+            setError(msg);
+          }
+        }
+      })
+      .finally(() => {
+        if (requestIdRef.current === id) setLoading(false);
+      });
   }, []);
 
+  // Re-fetch when tool or state changes
   useEffect(() => {
-    const hasCached = !!cacheRef.current[cacheKey];
-    if (hasCached) {
-      setAlerts(cacheRef.current[cacheKey]);
+    const cached = cacheRef.current[cacheKey];
+    if (cached) {
+      setAlerts(cached);
+    } else {
+      setAlerts(null);
     }
-    loadAlerts(selectedTool, stateFilter, hasCached);
-  }, [selectedTool, stateFilter, loadAlerts, cacheKey]);
+    fetchAlerts(selectedTool, stateFilter, cacheKey);
+  }, [selectedTool, stateFilter, cacheKey, fetchAlerts]);
+
+  const forceRefresh = useCallback(() => {
+    delete cacheRef.current[cacheKey];
+    setAlerts(null);
+    fetchAlerts(selectedTool, stateFilter, cacheKey);
+  }, [selectedTool, stateFilter, cacheKey, fetchAlerts]);
 
   // Filter and sort the alerts client-side
   const filteredAlerts = alerts?.alerts
@@ -209,7 +221,7 @@ export default function AlertsPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => loadAlerts(selectedTool, stateFilter, false)}
+          onClick={forceRefresh}
           disabled={loading}
         >
           {loading ? "Loading..." : "Refresh"}
