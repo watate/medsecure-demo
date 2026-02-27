@@ -202,6 +202,7 @@ async def seed_demo_data() -> dict:
             ("devin", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
             ("copilot", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
             ("anthropic", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
+            ("openai", "scan_started", "CodeQL scan detected 47 alerts on baseline", None, 0),
 
             # === Devin (fast, fully automated) ===
             ("devin", "session_created", "Devin session started for CWE-89 SQL Injection", 12, 2000),

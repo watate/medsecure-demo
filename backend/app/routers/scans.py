@@ -8,12 +8,14 @@ from app.config import settings
 from app.models.schemas import (
     BranchSummary,
     ComparisonResult,
+    CostEstimate,
     ScanListItem,
     ScanSnapshot,
     TriggerScanResponse,
 )
 from app.services.database import get_db
 from app.services.github_client import GitHubClient
+from app.services.report_generator import _estimate_api_cost
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -232,6 +234,7 @@ async def compare_latest() -> ComparisonResult:
     tools = {k: v for k, v in scan.branches.items() if k != "baseline"}
 
     improvements: dict[str, dict[str, int | float]] = {}
+    cost_estimates: dict[str, CostEstimate] = {}
     for tool_name, tool_summary in tools.items():
         improvements[tool_name] = {
             "total_fixed": baseline.open - tool_summary.open,
@@ -242,10 +245,16 @@ async def compare_latest() -> ComparisonResult:
             "fix_rate_pct": round((1 - tool_summary.open / baseline.open) * 100, 1) if baseline.open > 0 else 0.0,
         }
 
+        # Pre-remediation cost estimate for API-based tools
+        cost_data = _estimate_api_cost(tool_name, baseline.open)
+        if cost_data:
+            cost_estimates[tool_name] = CostEstimate(**cost_data)
+
     return ComparisonResult(
         repo=scan.repo,
         scanned_at=scan.created_at,
         baseline=baseline,
         tools=tools,
         improvements=improvements,
+        cost_estimates=cost_estimates if cost_estimates else None,
     )

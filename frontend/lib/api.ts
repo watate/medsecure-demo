@@ -28,12 +28,23 @@ export interface ScanListItem {
   branch_count: number;
 }
 
+export interface CostEstimate {
+  model: string;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  input_cost_usd: number;
+  output_cost_usd: number;
+  total_cost_usd: number;
+  pricing: Record<string, number>;
+}
+
 export interface ComparisonResult {
   repo: string;
   scanned_at: string;
   baseline: BranchSummary;
   tools: Record<string, BranchSummary>;
   improvements: Record<string, Record<string, number>>;
+  cost_estimates: Record<string, CostEstimate> | null;
 }
 
 export interface Alert {

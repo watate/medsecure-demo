@@ -73,12 +73,23 @@ class ScanListItem(BaseModel):
     branch_count: int
 
 
+class CostEstimate(BaseModel):
+    model: str
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    input_cost_usd: float
+    output_cost_usd: float
+    total_cost_usd: float
+    pricing: dict[str, float]
+
+
 class ComparisonResult(BaseModel):
     repo: str
     scanned_at: str
     baseline: BranchSummary
     tools: dict[str, BranchSummary]
     improvements: dict[str, dict[str, int | float]]
+    cost_estimates: dict[str, CostEstimate] | None = None
 
 
 class RemediationRequest(BaseModel):
