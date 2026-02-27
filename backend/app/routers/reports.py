@@ -52,8 +52,8 @@ async def _fetch_alerts_for_report(
 
 async def _get_summaries_from_scan(
     scan_id: int | None,
-) -> tuple[BranchSummary | None, dict[str, BranchSummary] | None, str]:
-    """Load scan summaries from DB. Returns (baseline_summary, tool_summaries, scan_date)."""
+) -> tuple[BranchSummary | None, dict[str, BranchSummary] | None, str, int | None]:
+    """Load scan summaries from DB. Returns (baseline_summary, tool_summaries, scan_date, resolved_scan_id)."""
     db = await get_db()
     try:
         if scan_id:
@@ -62,7 +62,7 @@ async def _get_summaries_from_scan(
             cursor = await db.execute("SELECT * FROM scans ORDER BY created_at DESC LIMIT 1")
         scan = await cursor.fetchone()
         if not scan:
-            return None, None, ""
+            return None, None, "", None
 
         actual_scan_id = scan["id"]
         scan_date = scan["created_at"]
@@ -91,7 +91,7 @@ async def _get_summaries_from_scan(
             else:
                 tool_summaries[row["tool"]] = summary
 
-        return baseline_summary, tool_summaries, scan_date
+        return baseline_summary, tool_summaries, scan_date, actual_scan_id
     finally:
         await db.close()
 
@@ -109,7 +109,7 @@ async def generate_report(
         raise HTTPException(status_code=400, detail="report_type must be 'ciso' or 'cto'")
 
     # Get scan summaries
-    baseline_summary, tool_summaries, scan_date = await _get_summaries_from_scan(request.scan_id)
+    baseline_summary, tool_summaries, scan_date, resolved_scan_id = await _get_summaries_from_scan(request.scan_id)
     if not baseline_summary:
         raise HTTPException(status_code=404, detail="No scan data found. Trigger a scan first.")
 
@@ -128,7 +128,7 @@ async def generate_report(
         raise HTTPException(status_code=502, detail=f"GitHub API error: {e}") from e
 
     # Load remediation timing from replay events if available
-    remediation_times = await _get_remediation_times(request.scan_id)
+    remediation_times = await _get_remediation_times(resolved_scan_id)
 
     if report_type == "ciso":
         assert tool_summaries is not None
@@ -158,7 +158,7 @@ async def generate_report(
     # Store report in DB
     db = await get_db()
     try:
-        scan_id_val = request.scan_id or 0
+        scan_id_val = resolved_scan_id or request.scan_id or 0
         await db.execute(
             "INSERT INTO generated_reports (scan_id, report_type, report_data) VALUES (?, ?, ?)",
             (scan_id_val, report_type, json.dumps(report)),

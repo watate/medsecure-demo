@@ -99,12 +99,15 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
   // Visible events (before current playback time)
   const visibleEvents = run.events.filter((e) => e.timestamp_offset_ms <= currentTime);
 
-  // Count fixes per tool at current time
+  // Count fixes per tool at current time (deduplicate by alert_number)
   const fixCounts: Record<string, number> = {};
   for (const tool of run.tools) {
-    fixCounts[tool] = visibleEvents.filter(
-      (e) => e.tool === tool && (e.event_type === "fix_pushed" || e.event_type === "codeql_verified" || e.event_type === "suggestion_accepted" || e.event_type === "patch_applied")
-    ).length;
+    const fixedAlerts = new Set(
+      visibleEvents
+        .filter((e) => e.tool === tool && e.alert_number != null && (e.event_type === "fix_pushed" || e.event_type === "codeql_verified" || e.event_type === "suggestion_accepted" || e.event_type === "patch_applied"))
+        .map((e) => e.alert_number)
+    );
+    fixCounts[tool] = fixedAlerts.size;
   }
 
   const play = useCallback(() => {
