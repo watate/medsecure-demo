@@ -1,6 +1,6 @@
 # MedSecure
 
-Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs Anthropic). Point it at any repo with CodeQL enabled and see which tool fixes the most vulnerabilities.
+Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs Anthropic vs OpenAI vs Google). Point it at any repo with CodeQL enabled and see which tool fixes the most vulnerabilities.
 
 ## Architecture
 
