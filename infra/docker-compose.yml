@@ -1,0 +1,56 @@
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+    depends_on:
+      - web
+      - api
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-southeast-1
+        awslogs-group: /medsecure/prod/caddy
+        tag: caddy/{{ .Name }}
+        awslogs-create-group: "true"
+
+  web:
+    image: ghcr.io/watate/medsecure-demo-web:latest
+    expose:
+      - "3000"
+    env_file:
+      - .env
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-southeast-1
+        awslogs-group: /medsecure/prod/web
+        tag: web/{{ .Name }}
+        awslogs-create-group: "true"
+
+  api:
+    image: ghcr.io/watate/medsecure-demo-api:latest
+    expose:
+      - "8000"
+    env_file:
+      - .env
+    volumes:
+      - medsecure_data:/data
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ap-southeast-1
+        awslogs-group: /medsecure/prod/api
+        tag: api/{{ .Name }}
+        awslogs-create-group: "true"
+
+volumes:
+  caddy_data:
+  medsecure_data:
