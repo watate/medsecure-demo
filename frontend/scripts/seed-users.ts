@@ -1,21 +1,26 @@
 /**
  * Seed script for Better Auth users.
  *
+ * Reads SEED_EMAIL, SEED_PASSWORD, and SEED_NAME from the .env file
+ * (or from environment variables if set inline).
+ *
  * Usage:
- *   SEED_EMAIL=user@example.com SEED_PASSWORD=changeme SEED_NAME=Admin npx tsx scripts/seed-users.ts
- *   # or via npm:
+ *   # Set SEED_EMAIL and SEED_PASSWORD in .env, then:
+ *   npm run seed
+ *
+ *   # Or pass inline:
  *   SEED_EMAIL=user@example.com SEED_PASSWORD=changeme npm run seed
  *
  * This will:
- *   1. Run the Better Auth migration to create tables if needed
- *   2. Create seed users in the auth.db SQLite database
+ *   1. Create seed users in the auth.db SQLite database
  *
- * Required environment variables:
+ * Required variables (in .env or environment):
  *   SEED_EMAIL    - email for the seed user
  *   SEED_PASSWORD - password for the seed user
  *   SEED_NAME     - display name (optional, defaults to "Admin")
  */
 
+import "dotenv/config";
 import { auth } from "../lib/auth";
 
 interface SeedUser {
@@ -28,8 +33,8 @@ const email = process.env.SEED_EMAIL;
 const password = process.env.SEED_PASSWORD;
 
 if (!email || !password) {
-  console.error("Error: SEED_EMAIL and SEED_PASSWORD environment variables are required.");
-  console.error("Usage: SEED_EMAIL=user@example.com SEED_PASSWORD=changeme npx tsx scripts/seed-users.ts");
+  console.error("Error: SEED_EMAIL and SEED_PASSWORD are required.");
+  console.error("Set them in .env or pass inline: SEED_EMAIL=user@example.com SEED_PASSWORD=changeme npm run seed");
   process.exit(1);
 }
 
