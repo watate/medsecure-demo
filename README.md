@@ -85,7 +85,7 @@ npm run dev
 
 Open http://localhost:3000. Sign in with your seeded credentials, then click "Run New Scan" to fetch CodeQL alerts.
 
-## Deploy to AWS
+## Deploy to AWS (Optional)
 
 ### Prerequisites
 
