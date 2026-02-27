@@ -9,13 +9,17 @@ import { Button } from "@/components/ui/button";
 const TOOL_LABELS: Record<string, string> = {
   devin: "Devin",
   copilot: "Copilot Autofix",
-  anthropic: "Anthropic",
+  anthropic: "Anthropic (claude-opus-4-6)",
+  openai: "OpenAI (gpt-5.3-codex)",
+  gemini: "Google (gemini-3.1-pro-preview)",
 };
 
 const TOOL_COLORS: Record<string, string> = {
   devin: "bg-emerald-500",
   copilot: "bg-blue-500",
   anthropic: "bg-orange-500",
+  openai: "bg-violet-500",
+  gemini: "bg-pink-500",
 };
 
 function SeverityBar({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
@@ -146,7 +150,7 @@ export default function DashboardPage() {
           </Card>
 
           {/* Tool Comparison Cards */}
-          <div className="grid gap-6 md:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(comparison.tools).map(([toolName, summary]) => {
               const improvement = comparison.improvements[toolName];
               const fixRate = improvement?.fix_rate_pct ?? 0;
@@ -183,6 +187,22 @@ export default function DashboardPage() {
                       <SeverityBar label="Medium" count={summary.medium} total={comparison.baseline.medium || 1} color="bg-yellow-500" />
                       <SeverityBar label="Low" count={summary.low} total={comparison.baseline.low || 1} color="bg-blue-500" />
                     </div>
+
+                    {/* Cost estimate for API-based tools */}
+                    {comparison.cost_estimates?.[toolName] && (
+                      <div className="pt-3 border-t">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-muted-foreground">Est. remediation cost</span>
+                          <span className="text-sm font-semibold">
+                            ${comparison.cost_estimates[toolName].total_cost_usd.toFixed(4)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          {comparison.cost_estimates[toolName].model} &middot;{" "}
+                          {comparison.cost_estimates[toolName].estimated_input_tokens.toLocaleString()} tokens
+                        </p>
+                      </div>
+                    )}
                   </CardContent>
                 </Card>
               );

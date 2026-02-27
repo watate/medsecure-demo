@@ -19,6 +19,8 @@ def _resolve_branch(tool: str) -> str:
         "devin": settings.branch_devin,
         "copilot": settings.branch_copilot,
         "anthropic": settings.branch_anthropic,
+        "openai": settings.branch_openai,
+        "gemini": settings.branch_google,
     }
     branch = branch_map.get(tool)
     if not branch:
@@ -28,7 +30,7 @@ def _resolve_branch(tool: str) -> str:
 
 @router.get("/live", response_model=AlertsResponse)
 async def get_live_alerts(
-    tool: str = Query(default="baseline", description="Tool name: baseline, devin, copilot, anthropic"),
+    tool: str = Query(default="baseline", description="Tool name: baseline, devin, copilot, anthropic, openai, gemini"),
     state: str | None = Query(default=None, description="Filter by state: open, fixed, dismissed"),
 ) -> AlertsResponse:
     """Fetch live alerts from GitHub API for a specific tool's branch."""

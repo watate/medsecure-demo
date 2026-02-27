@@ -9,7 +9,9 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 const TOOL_LABELS: Record<string, string> = {
   devin: "Devin",
   copilot: "Copilot Autofix",
-  anthropic: "Anthropic",
+  anthropic: "Anthropic (claude-opus-4-6)",
+  openai: "OpenAI (gpt-5.3-codex)",
+  gemini: "Google (gemini-3.1-pro-preview)",
 };
 
 function SeverityDot({ color }: { color: string }) {
@@ -152,7 +154,7 @@ function CISOReport({ data }: { data: ReportData }) {
           <CardDescription>How each tool reduced alerts by severity level</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-6 md:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(severityBA).map(([tool, severities]) => {
               const s = severities as Record<string, Record<string, number>>;
               return (
@@ -182,6 +184,53 @@ function CISOReport({ data }: { data: ReportData }) {
           </div>
         </CardContent>
       </Card>
+
+      {/* Cost Estimates */}
+      {Object.entries(toolPerf).some(([, info]) => (info as Record<string, unknown>).cost_estimate) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>API Cost Estimates</CardTitle>
+            <CardDescription>Estimated token usage and cost per tool</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-2">
+              {Object.entries(toolPerf)
+                .filter(([, info]) => (info as Record<string, unknown>).cost_estimate)
+                .map(([tool, info]) => {
+                  const cost = (info as Record<string, Record<string, number | string | Record<string, number>>>).cost_estimate;
+                  return (
+                    <div key={tool} className="rounded-lg border p-4 space-y-2">
+                      <p className="font-medium">{TOOL_LABELS[tool] || tool}</p>
+                      <p className="text-xs text-muted-foreground">Model: {cost.model as string}</p>
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Input tokens</span>
+                          <span className="font-mono">{(cost.estimated_input_tokens as number).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Output tokens</span>
+                          <span className="font-mono">{(cost.estimated_output_tokens as number).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Input cost</span>
+                          <span className="font-semibold">${(cost.input_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Output cost</span>
+                          <span className="font-semibold">${(cost.output_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm border-t pt-1">
+                          <span className="font-medium">Total</span>
+                          <span className="font-bold text-emerald-600">${(cost.total_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Verification & Correctness */}
       <Card className="border-emerald-500/30">
@@ -316,7 +365,7 @@ function CTOReport({ data }: { data: ReportData }) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(roiAnalysis.tools || {}).map(([tool, info]) => {
               const r = info as Record<string, number>;
               return (
@@ -349,7 +398,7 @@ function CTOReport({ data }: { data: ReportData }) {
           <CardTitle>Security Backlog Impact</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
             {Object.entries(backlog).map(([tool, info]) => {
               const b = info as Record<string, number>;
               return (
@@ -375,6 +424,53 @@ function CTOReport({ data }: { data: ReportData }) {
           </div>
         </CardContent>
       </Card>
+
+      {/* Cost Estimates */}
+      {Object.entries(toolComparison).some(([, info]) => (info as Record<string, unknown>).cost_estimate) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>API Cost Estimates</CardTitle>
+            <CardDescription>Estimated token usage and cost per tool</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 md:grid-cols-2">
+              {Object.entries(toolComparison)
+                .filter(([, info]) => (info as Record<string, unknown>).cost_estimate)
+                .map(([tool, info]) => {
+                  const cost = (info as Record<string, Record<string, number | string | Record<string, number>>>).cost_estimate;
+                  return (
+                    <div key={tool} className="rounded-lg border p-4 space-y-2">
+                      <p className="font-medium">{TOOL_LABELS[tool] || tool}</p>
+                      <p className="text-xs text-muted-foreground">Model: {cost.model as string}</p>
+                      <div className="space-y-1">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Input tokens</span>
+                          <span className="font-mono">{(cost.estimated_input_tokens as number).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Output tokens</span>
+                          <span className="font-mono">{(cost.estimated_output_tokens as number).toLocaleString()}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Input cost</span>
+                          <span className="font-semibold">${(cost.input_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm">
+                          <span className="text-muted-foreground">Output cost</span>
+                          <span className="font-semibold">${(cost.output_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                        <div className="flex justify-between text-sm border-t pt-1">
+                          <span className="font-medium">Total</span>
+                          <span className="font-bold text-emerald-600">${(cost.total_cost_usd as number).toFixed(4)}</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Integration Workflow */}
       <Card>

@@ -25,6 +25,8 @@ class ToolName(str, Enum):
     devin = "devin"
     copilot = "copilot"
     anthropic = "anthropic"
+    openai = "openai"
+    gemini = "gemini"
 
 
 class Alert(BaseModel):
@@ -56,6 +58,7 @@ class BranchSummary(BaseModel):
     medium: int
     low: int
     other: int
+    estimated_prompt_tokens: int = 0
 
 
 class ScanSnapshot(BaseModel):
@@ -72,12 +75,23 @@ class ScanListItem(BaseModel):
     branch_count: int
 
 
+class CostEstimate(BaseModel):
+    model: str
+    estimated_input_tokens: int
+    estimated_output_tokens: int
+    input_cost_usd: float
+    output_cost_usd: float
+    total_cost_usd: float
+    pricing: dict[str, float]
+
+
 class ComparisonResult(BaseModel):
     repo: str
     scanned_at: str
     baseline: BranchSummary
     tools: dict[str, BranchSummary]
     improvements: dict[str, dict[str, int | float]]
+    cost_estimates: dict[str, CostEstimate] | None = None
 
 
 class RemediationRequest(BaseModel):
@@ -112,6 +126,8 @@ class RepoConfig(BaseModel):
     branch_devin: str
     branch_copilot: str
     branch_anthropic: str
+    branch_openai: str
+    branch_google: str
 
 
 class HealthResponse(BaseModel):

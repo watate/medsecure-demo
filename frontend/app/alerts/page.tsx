@@ -20,6 +20,8 @@ const TOOLS = [
   { key: "devin", label: "Devin" },
   { key: "copilot", label: "Copilot" },
   { key: "anthropic", label: "Anthropic" },
+  { key: "openai", label: "OpenAI" },
+  { key: "gemini", label: "Google" },
 ];
 
 const STATE_OPTIONS = [
