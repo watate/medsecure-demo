@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/replay", tags=["replay"])
 async def create_run(scan_id: int | None = None) -> ReplayRun:
     """Create a new replay run to record remediation events."""
     now = datetime.now(timezone.utc).isoformat()
-    tools = ["devin", "copilot", "anthropic"]
+    tools = ["devin", "copilot", "anthropic", "openai"]
 
     db = await get_db()
     try:
@@ -185,7 +185,7 @@ async def seed_demo_data() -> dict:
     than Copilot and Anthropic.
     """
     now = datetime.now(timezone.utc).isoformat()
-    tools = ["devin", "copilot", "anthropic"]
+    tools = ["devin", "copilot", "anthropic", "openai"]
 
     db = await get_db()
     try:
@@ -240,14 +240,14 @@ async def seed_demo_data() -> dict:
              "28/47 alerts fixed (59.6%). Required manual acceptance.",
              None, 14400000),
 
-            # === Anthropic (medium speed, API-based) ===
-            ("anthropic", "api_call_sent", "Sending alert context to Claude API", 12, 5000),
-            ("anthropic", "patch_generated", "Claude generated fix for SQL Injection", 12, 15000),
+            # === Anthropic (medium speed, API-based — claude-opus-4-6) ===
+            ("anthropic", "api_call_sent", "Sending alert context to claude-opus-4-6", 12, 5000),
+            ("anthropic", "patch_generated", "claude-opus-4-6 generated fix for SQL Injection", 12, 15000),
             ("anthropic", "patch_applied", "Patch applied to tomcat-anthropic branch", 12, 20000),
             ("anthropic", "codeql_verified", "Alert #12 resolved", 12, 65000),
 
-            ("anthropic", "api_call_sent", "Sending alert context for XSS", 15, 18000),
-            ("anthropic", "patch_generated", "Fix generated for XSS vulnerability", 15, 28000),
+            ("anthropic", "api_call_sent", "Sending alert context for XSS to claude-opus-4-6", 15, 18000),
+            ("anthropic", "patch_generated", "claude-opus-4-6 generated fix for XSS vulnerability", 15, 28000),
             ("anthropic", "patch_applied", "Patch applied", 15, 32000),
             ("anthropic", "codeql_verified", "Alert #15 resolved", 15, 78000),
 
@@ -257,6 +257,24 @@ async def seed_demo_data() -> dict:
             ("anthropic", "remediation_complete",
              "31/47 alerts fixed (66.0%). 3 patches failed CodeQL verification.",
              None, 2700000),
+
+            # === OpenAI (API-based — gpt-5.3-codex) ===
+            ("openai", "api_call_sent", "Sending alert context to gpt-5.3-codex", 12, 4000),
+            ("openai", "patch_generated", "gpt-5.3-codex generated fix for SQL Injection", 12, 12000),
+            ("openai", "patch_applied", "Patch applied to tomcat-openai branch", 12, 16000),
+            ("openai", "codeql_verified", "Alert #12 resolved", 12, 60000),
+
+            ("openai", "api_call_sent", "Sending alert context for XSS to gpt-5.3-codex", 15, 14000),
+            ("openai", "patch_generated", "gpt-5.3-codex generated fix for XSS vulnerability", 15, 24000),
+            ("openai", "patch_applied", "Patch applied", 15, 28000),
+            ("openai", "codeql_verified", "Alert #15 resolved", 15, 72000),
+
+            ("openai", "batch_complete", "Batch 1: 11 fixes applied in 4 min", None, 240000),
+            ("openai", "batch_complete", "Batch 2: 13 fixes applied in 12 min", None, 720000),
+            ("openai", "batch_complete", "Batch 3: 8 fixes applied in 25 min", None, 1500000),
+            ("openai", "remediation_complete",
+             "32/47 alerts fixed (68.1%). 4 patches failed CodeQL verification.",
+             None, 2400000),
         ]
 
         for tool, event_type, detail, alert_num, offset_ms in demo_events:

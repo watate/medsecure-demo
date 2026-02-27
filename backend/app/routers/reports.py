@@ -22,6 +22,7 @@ def _get_branch_map() -> dict[str, str]:
         "devin": settings.branch_devin,
         "copilot": settings.branch_copilot,
         "anthropic": settings.branch_anthropic,
+        "openai": settings.branch_openai,
     }
 
 

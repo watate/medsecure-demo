@@ -25,6 +25,7 @@ class ToolName(str, Enum):
     devin = "devin"
     copilot = "copilot"
     anthropic = "anthropic"
+    openai = "openai"
 
 
 class Alert(BaseModel):
@@ -112,6 +113,7 @@ class RepoConfig(BaseModel):
     branch_devin: str
     branch_copilot: str
     branch_anthropic: str
+    branch_openai: str
 
 
 class HealthResponse(BaseModel):

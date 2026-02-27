@@ -78,6 +78,7 @@ export interface RepoConfig {
   branch_devin: string;
   branch_copilot: string;
   branch_anthropic: string;
+  branch_openai: string;
 }
 
 export interface HealthResponse {

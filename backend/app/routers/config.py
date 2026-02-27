@@ -15,4 +15,5 @@ async def get_config() -> RepoConfig:
         branch_devin=settings.branch_devin,
         branch_copilot=settings.branch_copilot,
         branch_anthropic=settings.branch_anthropic,
+        branch_openai=settings.branch_openai,
     )

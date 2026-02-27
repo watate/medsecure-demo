@@ -9,13 +9,15 @@ import { Button } from "@/components/ui/button";
 const TOOL_LABELS: Record<string, string> = {
   devin: "Devin",
   copilot: "Copilot Autofix",
-  anthropic: "Anthropic",
+  anthropic: "Anthropic (claude-opus-4-6)",
+  openai: "OpenAI (gpt-5.3-codex)",
 };
 
 const TOOL_COLORS: Record<string, string> = {
   devin: "bg-emerald-500",
   copilot: "bg-blue-500",
   anthropic: "bg-orange-500",
+  openai: "bg-violet-500",
 };
 
 function SeverityBar({ label, count, total, color }: { label: string; count: number; total: number; color: string }) {
@@ -146,7 +148,7 @@ export default function DashboardPage() {
           </Card>
 
           {/* Tool Comparison Cards */}
-          <div className="grid gap-6 md:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
             {Object.entries(comparison.tools).map(([toolName, summary]) => {
               const improvement = comparison.improvements[toolName];
               const fixRate = improvement?.fix_rate_pct ?? 0;

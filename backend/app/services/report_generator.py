@@ -14,6 +14,55 @@ from app.models.schemas import BranchSummary
 
 logger = logging.getLogger(__name__)
 
+# Cost per million tokens (USD)
+# Anthropic claude-opus-4-6
+_ANTHROPIC_INPUT_COST_PER_MTOK = 5.0
+_ANTHROPIC_OUTPUT_COST_PER_MTOK = 25.0
+# OpenAI gpt-5.3-codex
+_OPENAI_INPUT_COST_PER_MTOK = 1.75
+_OPENAI_OUTPUT_COST_PER_MTOK = 14.0
+
+# Rough estimate: ~1500 input tokens per alert (code context + rule description)
+_ESTIMATED_INPUT_TOKENS_PER_ALERT = 1500
+
+
+def _estimate_api_cost(tool_name: str, alerts_processed: int) -> dict | None:
+    """Estimate the API cost for a tool based on number of alerts processed.
+
+    Input tokens are estimated at ~1500 tokens per alert (code context + rule).
+    Output tokens are assumed equal to input tokens as an approximation.
+    """
+    if tool_name == "anthropic":
+        input_cost_per_mtok = _ANTHROPIC_INPUT_COST_PER_MTOK
+        output_cost_per_mtok = _ANTHROPIC_OUTPUT_COST_PER_MTOK
+        model = "claude-opus-4-6"
+    elif tool_name == "openai":
+        input_cost_per_mtok = _OPENAI_INPUT_COST_PER_MTOK
+        output_cost_per_mtok = _OPENAI_OUTPUT_COST_PER_MTOK
+        model = "gpt-5.3-codex"
+    else:
+        return None
+
+    input_tokens = alerts_processed * _ESTIMATED_INPUT_TOKENS_PER_ALERT
+    output_tokens = input_tokens  # approximate: output ≈ input
+
+    input_cost = (input_tokens / 1_000_000) * input_cost_per_mtok
+    output_cost = (output_tokens / 1_000_000) * output_cost_per_mtok
+    total_cost = input_cost + output_cost
+
+    return {
+        "model": model,
+        "estimated_input_tokens": input_tokens,
+        "estimated_output_tokens": output_tokens,
+        "input_cost_usd": round(input_cost, 4),
+        "output_cost_usd": round(output_cost, 4),
+        "total_cost_usd": round(total_cost, 4),
+        "pricing": {
+            "input_per_mtok_usd": input_cost_per_mtok,
+            "output_per_mtok_usd": output_cost_per_mtok,
+        },
+    }
+
 
 
 def generate_ciso_report(
@@ -56,7 +105,9 @@ def generate_ciso_report(
         if tool_name == "copilot":
             automation = "requires manual acceptance per suggestion"
         elif tool_name == "anthropic":
-            automation = "requires patch review and application"
+            automation = "requires patch review and application (claude-opus-4-6)"
+        elif tool_name == "openai":
+            automation = "requires patch review and application (gpt-5.3-codex)"
 
         perf: dict = {
             "total_fixed": total_fixed,
@@ -78,6 +129,11 @@ def generate_ciso_report(
             perf["avg_time_per_fix"] = _format_duration(avg_secs)
             perf["total_seconds"] = round(secs, 1)
             perf["avg_seconds_per_fix"] = round(avg_secs, 1)
+
+        # Cost estimate for API-based tools
+        cost = _estimate_api_cost(tool_name, summary.total)
+        if cost:
+            perf["cost_estimate"] = cost
 
         tool_performance[tool_name] = perf
 
@@ -186,7 +242,9 @@ def generate_cto_report(
         if tool_name == "copilot":
             human_intervention = "manual acceptance of each suggestion"
         elif tool_name == "anthropic":
-            human_intervention = "patch review and application"
+            human_intervention = "patch review and application (claude-opus-4-6)"
+        elif tool_name == "openai":
+            human_intervention = "patch review and application (gpt-5.3-codex)"
 
         entry: dict = {
             "total_fixed": total_fixed,
@@ -200,6 +258,11 @@ def generate_cto_report(
             secs = remediation_times[tool_name]
             entry["total_time"] = _format_duration(secs)
             entry["avg_time_per_fix"] = _format_duration(secs / total_fixed) if total_fixed > 0 else "N/A"
+
+        # Cost estimate for API-based tools
+        cost = _estimate_api_cost(tool_name, summary.total)
+        if cost:
+            entry["cost_estimate"] = cost
 
         tool_comparison[tool_name] = entry
 
