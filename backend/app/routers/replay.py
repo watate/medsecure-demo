@@ -18,7 +18,7 @@ router = APIRouter(prefix="/api/replay", tags=["replay"])
 async def create_run(scan_id: int | None = None) -> ReplayRun:
     """Create a new replay run to record remediation events."""
     now = datetime.now(timezone.utc).isoformat()
-    tools = ["devin", "copilot", "anthropic", "openai"]
+    tools = ["devin", "copilot", "anthropic", "openai", "gemini"]
 
     db = await get_db()
     try:
@@ -185,7 +185,7 @@ async def seed_demo_data() -> dict:
     than Copilot and Anthropic.
     """
     now = datetime.now(timezone.utc).isoformat()
-    tools = ["devin", "copilot", "anthropic", "openai"]
+    tools = ["devin", "copilot", "anthropic", "openai", "gemini"]
 
     db = await get_db()
     try:
