@@ -25,14 +25,17 @@ _OPENAI_OUTPUT_COST_PER_MTOK = 14.0
 _GEMINI_INPUT_COST_PER_MTOK = 2.0
 _GEMINI_OUTPUT_COST_PER_MTOK = 12.0
 
-# Rough estimate: ~1500 input tokens per alert (code context + rule description)
-_ESTIMATED_INPUT_TOKENS_PER_ALERT = 1500
+# Rough estimate: ~4500 input tokens per alert
+# Breakdown: ~3000-4000 tokens for full source file + ~500 for alert context
+# (CWE description, rule ID, affected lines) + ~200 for prompt instructions
+_ESTIMATED_INPUT_TOKENS_PER_ALERT = 4500
 
 
 def _estimate_api_cost(tool_name: str, alerts_processed: int) -> dict | None:
     """Estimate the API cost for a tool based on number of alerts processed.
 
-    Input tokens are estimated at ~1500 tokens per alert (code context + rule).
+    Input tokens are estimated at ~4500 tokens per alert (full source file +
+    alert context + prompt instructions).
     Output tokens are assumed equal to input tokens as an approximation.
     """
     if tool_name == "anthropic":
