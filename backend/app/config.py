@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     branch_copilot: str = "tomcat-copilot"
     branch_anthropic: str = "tomcat-anthropic"
     branch_openai: str = "tomcat-openai"
-    branch_gemini: str = "tomcat-gemini"
+    branch_google: str = "tomcat-google"
 
     # Devin API
     devin_api_key: str = ""

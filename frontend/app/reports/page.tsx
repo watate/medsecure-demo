@@ -274,7 +274,7 @@ function CTOReport({ data }: { data: ReportData }) {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-2 gap-6 sm:grid-cols-5">
+          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
             <div>
               <p className="text-3xl font-bold">{exec.baseline_open_alerts ?? 0}</p>
               <p className="text-xs text-muted-foreground">Open Alerts</p>

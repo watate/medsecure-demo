@@ -126,7 +126,7 @@ class RepoConfig(BaseModel):
     branch_copilot: str
     branch_anthropic: str
     branch_openai: str
-    branch_gemini: str
+    branch_google: str
 
 
 class HealthResponse(BaseModel):

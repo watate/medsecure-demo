@@ -20,7 +20,7 @@ def _resolve_branch(tool: str) -> str:
         "copilot": settings.branch_copilot,
         "anthropic": settings.branch_anthropic,
         "openai": settings.branch_openai,
-        "gemini": settings.branch_gemini,
+        "gemini": settings.branch_google,
     }
     branch = branch_map.get(tool)
     if not branch:

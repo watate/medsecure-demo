@@ -90,7 +90,7 @@ export interface RepoConfig {
   branch_copilot: string;
   branch_anthropic: string;
   branch_openai: string;
-  branch_gemini: string;
+  branch_google: string;
 }
 
 export interface HealthResponse {
