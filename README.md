@@ -1,2 +1,141 @@
-# medsecure-demo
+# MedSecure
+
+Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs Anthropic). Point it at any repo with CodeQL enabled and see which tool fixes the most vulnerabilities.
+
+## Architecture
+
+- **Backend**: FastAPI + SQLite — fetches CodeQL alerts via GitHub API, triggers Devin remediation sessions
+- **Frontend**: Next.js + shadcn/ui — dashboard comparing alert counts per tool, alert browser, remediation log
+- **Infra**: Terraform (EC2 + S3), Docker Compose (Caddy + API + Web), GitHub Actions CI/CD
+
+## Quick Start (Local)
+
+### 1. Prepare your target repo
+
+Enable CodeQL on the repo you want to scan. Update the workflow to scan all branches:
+
+```yaml
+on:
+  push:
+    branches: ['**']
+```
+
+Create branches from `main` for each tool:
+
+```bash
+git checkout main
+git checkout -b tomcat-devin && git push origin tomcat-devin
+git checkout main
+git checkout -b tomcat-copilot && git push origin tomcat-copilot
+git checkout main
+git checkout -b tomcat-anthropic && git push origin tomcat-anthropic
+```
+
+### 2. Create a GitHub PAT
+
+Fine-grained PAT with these permissions on the target repo:
+- **Code scanning alerts**: Read
+- **Contents**: Read & Write
+- **Pull requests**: Read & Write
+
+Or a classic PAT with scopes: `repo`, `security_events`.
+
+### 3. Configure environment
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env`:
+
+```
+GITHUB_TOKEN=ghp_your_token_here
+GITHUB_REPO=your-org/your-repo
+DEVIN_API_KEY=your_devin_api_key
+BRANCH_BASELINE=main
+BRANCH_DEVIN=tomcat-devin
+BRANCH_COPILOT=tomcat-copilot
+BRANCH_ANTHROPIC=tomcat-anthropic
+```
+
+### 4. Run locally
+
+```bash
+# Backend
+cd backend
+uv sync
+uv run fastapi dev app/main.py
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000. Click "Run New Scan" to fetch CodeQL alerts.
+
+## Deploy to AWS
+
+### Prerequisites
+
+- AWS CLI configured with profile `watate` (or change in `infra/terraform/variables.tf`)
+- SSH key pair for EC2
+- Devin GitHub App installed on target repo (for Devin API access)
+
+### Steps
+
+```bash
+# 1. Provision infrastructure
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars  # edit values
+terraform init && terraform apply
+
+# 2. Push secrets to SSM
+cp backend/.env.example .env  # fill in real values
+bash infra/scripts/push-env-to-ssm.sh .env
+
+# 3. SSH to EC2 and set up
+ssh ubuntu@<elastic-ip>
+bash setup.sh
+
+# 4. Deploy
+bash deploy.sh
+```
+
+### What gets deployed
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Caddy | 80/443 | Reverse proxy, auto-TLS |
+| API | 8000 | FastAPI backend |
+| Web | 3000 | Next.js dashboard |
+
+SQLite database is stored on a Docker volume at `/data/medsecure.db` and backed up to S3 every 6 hours.
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/health` | Health check |
+| GET | `/api/config` | Current repo/branch config |
+| POST | `/api/scans/trigger` | Fetch CodeQL alerts for all branches |
+| GET | `/api/scans` | List scan snapshots |
+| GET | `/api/scans/compare/latest` | Compare latest scan across tools |
+| GET | `/api/alerts/live?tool=baseline` | Live alerts from GitHub API |
+| POST | `/api/remediate/devin` | Create Devin sessions to fix alerts |
+| GET | `/api/remediate/devin/sessions` | List Devin sessions |
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GITHUB_TOKEN` | Yes | GitHub PAT with code scanning access |
+| `GITHUB_REPO` | Yes | Target repo (e.g. `owner/repo`) |
+| `DEVIN_API_KEY` | For remediation | Devin API key |
+| `BRANCH_BASELINE` | No | Baseline branch (default: `main`) |
+| `BRANCH_DEVIN` | No | Devin fix branch (default: `tomcat-devin`) |
+| `BRANCH_COPILOT` | No | Copilot fix branch (default: `tomcat-copilot`) |
+| `BRANCH_ANTHROPIC` | No | Anthropic fix branch (default: `tomcat-anthropic`) |
+| `DATABASE_PATH` | No | SQLite path (default: `medsecure.db`) |
+| `S3_BACKUP_BUCKET` | For backups | S3 bucket name |
 
