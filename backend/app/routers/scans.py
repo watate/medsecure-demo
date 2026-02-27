@@ -1,6 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
@@ -101,6 +102,15 @@ async def trigger_scan() -> TriggerScanResponse:
 
                 branches_scanned.append(branch)
                 logger.info("Scanned branch %s (%s): %d alerts", branch, tool_name, summary.total)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 403:
+                    logger.error(
+                        "GitHub API 403 for branch %s (%s): token likely lacks "
+                        "'security_events' scope or 'Code scanning alerts: Read' permission",
+                        branch, tool_name,
+                    )
+                else:
+                    logger.exception("Failed to scan branch %s (%s)", branch, tool_name)
             except Exception:
                 logger.exception("Failed to scan branch %s (%s)", branch, tool_name)
 

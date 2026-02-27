@@ -102,6 +102,12 @@ export default function AlertsPage() {
         <Card className="border-destructive">
           <CardContent className="pt-6">
             <p className="text-destructive text-sm">{error}</p>
+            {error.includes("403") && (
+              <p className="text-muted-foreground text-xs mt-2">
+                Your GITHUB_TOKEN likely needs the &apos;security_events&apos; scope (classic PAT)
+                or &apos;Code scanning alerts: Read&apos; permission (fine-grained PAT).
+              </p>
+            )}
           </CardContent>
         </Card>
       )}

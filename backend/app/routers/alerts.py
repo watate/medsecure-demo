@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
@@ -37,6 +38,20 @@ async def get_live_alerts(
     try:
         alerts = await github.get_alerts(branch, state=state)
         return AlertsResponse(branch=branch, tool=tool, total=len(alerts), alerts=alerts)
+    except httpx.HTTPStatusError as e:
+        logger.exception("Failed to fetch live alerts for branch %s", branch)
+        if e.response.status_code == 403:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "GitHub API returned 403 Forbidden. "
+                    "Your GITHUB_TOKEN likely lacks the 'security_events' scope "
+                    "(classic PAT) or 'Code scanning alerts: Read' permission "
+                    "(fine-grained PAT). "
+                    "See: https://docs.github.com/en/rest/code-scanning"
+                ),
+            ) from e
+        raise HTTPException(status_code=502, detail=f"GitHub API error: {e}") from e
     except Exception as e:
         logger.exception("Failed to fetch live alerts for branch %s", branch)
         raise HTTPException(status_code=502, detail=f"GitHub API error: {e}") from e
