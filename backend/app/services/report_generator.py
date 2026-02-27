@@ -266,12 +266,11 @@ def generate_cto_report(
             "description": "Automated remediation pipeline — zero engineer time required",
             "steps": [
                 "CodeQL scan detects vulnerabilities on push",
-                "MedSecure platform fetches new alerts via GitHub API",
+                "Platform fetches new alerts via GitHub API",
                 "Devin API creates automated fix sessions per alert",
+                "Fixes are tested in Devin's sandboxed environment"
                 "Fixes are pushed to tool-specific branches",
                 "CodeQL re-scans to verify fixes — no false claims",
-                "Dashboard shows real-time comparison across tools",
-                "Reports generated for stakeholder review",
             ],
         },
         "recommendation": _generate_recommendation(tool_comparison, best_tool),

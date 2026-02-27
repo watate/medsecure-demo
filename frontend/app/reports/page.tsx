@@ -196,8 +196,8 @@ function CISOReport({ data }: { data: ReportData }) {
             <p className="text-sm font-medium">Why Devin is different:</p>
             <ul className="text-sm text-muted-foreground space-y-1 list-disc list-inside">
               <li>Runs build and test suites in a sandboxed environment before pushing fixes</li>
-              <li>Iterates on failures automatically — no human intervention needed</li>
-              <li>Copilot Autofix and Anthropic generate patches blind without executing them</li>
+              <li>Iterates on failures automatically, no human intervention needed</li>
+              <li>Other coding agents generate patches without testing them</li>
             </ul>
           </div>
         </CardContent>
