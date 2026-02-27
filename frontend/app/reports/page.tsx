@@ -20,7 +20,6 @@ function CISOReport({ data }: { data: ReportData }) {
   const headline = data.headline || {};
   const toolPerf = data.tool_performance || {};
   const severityBA = data.severity_before_after || {};
-  const benchmark = data.industry_benchmark || {};
   const verification = data.verification || {};
 
   return (
@@ -203,17 +202,6 @@ function CISOReport({ data }: { data: ReportData }) {
         </CardContent>
       </Card>
 
-      {/* Industry Benchmark */}
-      <Card>
-        <CardContent className="pt-6">
-          <p className="text-sm">
-            <strong>Industry benchmark:</strong> {benchmark.note}
-          </p>
-          <p className="text-xs text-muted-foreground mt-1">
-            Source: {benchmark.source}
-          </p>
-        </CardContent>
-      </Card>
     </div>
   );
 }
