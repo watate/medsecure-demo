@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     auth_db_path: str = "../frontend/auth.db"
 
     # CORS
-    cors_origins: str = "*"
+    cors_origins: str = "http://localhost:3000"
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

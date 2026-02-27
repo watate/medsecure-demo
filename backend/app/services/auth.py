@@ -74,7 +74,7 @@ async def validate_session(
                 SELECT u.id AS user_id, u.name, u.email
                 FROM session s
                 JOIN user u ON s.userId = u.id
-                WHERE s.token = ? AND s.expiresAt > datetime('now')
+                WHERE s.token = ? AND s.expiresAt > strftime('%Y-%m-%dT%H:%M:%S', 'now')
                 """,
                 (db_token,),
             )
