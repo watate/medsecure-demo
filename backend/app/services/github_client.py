@@ -1,7 +1,7 @@
 import httpx
 
 from app.config import settings
-from app.models.schemas import Alert, BranchSummary
+from app.models.schemas import Alert, AlertWithCWE, BranchSummary
 
 
 class GitHubClient:
@@ -111,6 +111,68 @@ class GitHubClient:
             low=severity_counts["low"],
             other=severity_counts["other"],
         )
+
+    async def get_alerts_with_cwe(self, branch: str, state: str | None = None) -> list[AlertWithCWE]:
+        """Fetch CodeQL alerts enriched with CWE IDs from rule tags."""
+        from app.services.compliance import parse_cwe_ids_from_tags
+
+        enriched: list[AlertWithCWE] = []
+        page = 1
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                params: dict[str, str | int] = {
+                    "ref": f"refs/heads/{branch}",
+                    "per_page": 100,
+                    "page": page,
+                }
+                if state:
+                    params["state"] = state
+
+                response = await client.get(
+                    f"{self.BASE_URL}/repos/{self.repo}/code-scanning/alerts",
+                    headers=self.headers,
+                    params=params,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if not data:
+                    break
+
+                for item in data:
+                    rule = item.get("rule", {})
+                    most_recent = item.get("most_recent_instance", {})
+                    location = most_recent.get("location", {})
+                    tags = rule.get("tags", [])
+                    cwe_ids = parse_cwe_ids_from_tags(tags)
+
+                    enriched.append(
+                        AlertWithCWE(
+                            number=item["number"],
+                            rule_id=rule.get("id", ""),
+                            rule_description=rule.get("description", ""),
+                            severity=rule.get("security_severity_level") or rule.get("severity") or "note",
+                            state=item.get("state", "open"),
+                            tool=item.get("tool", {}).get("name", "CodeQL"),
+                            file_path=location.get("path", ""),
+                            start_line=location.get("start_line", 0),
+                            end_line=location.get("end_line", 0),
+                            message=most_recent.get("message", {}).get("text", ""),
+                            html_url=item.get("html_url", ""),
+                            created_at=item.get("created_at", ""),
+                            dismissed_at=item.get("dismissed_at"),
+                            fixed_at=item.get("fixed_at"),
+                            cwe_ids=cwe_ids,
+                            rule_tags=tags,
+                        )
+                    )
+
+                if len(data) < 100:
+                    break
+                page += 1
+
+        return enriched
 
     async def get_alert_detail(self, alert_number: int) -> dict:
         """Get detailed information about a specific alert."""

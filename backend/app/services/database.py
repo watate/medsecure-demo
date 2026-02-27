@@ -69,8 +69,39 @@ async def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS replay_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                scan_id INTEGER REFERENCES scans(id),
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ended_at TEXT,
+                status TEXT NOT NULL DEFAULT 'running',
+                tools TEXT NOT NULL DEFAULT '[]'
+            );
+
+            CREATE TABLE IF NOT EXISTS replay_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id INTEGER NOT NULL REFERENCES replay_runs(id),
+                tool TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
+                alert_number INTEGER,
+                timestamp_offset_ms INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS generated_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL REFERENCES scans(id),
+                report_type TEXT NOT NULL,
+                report_data TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
             CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_replay_events_run ON replay_events(run_id);
+            CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
             """
         )

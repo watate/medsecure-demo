@@ -134,8 +134,61 @@ class RemediationResponse(BaseModel):
     message: str
 
 
+class AlertWithCWE(Alert):
+    """Alert enriched with CWE IDs parsed from CodeQL rule tags."""
+
+    cwe_ids: list[str] = []
+    rule_tags: list[str] = []
+
+
 class AlertsResponse(BaseModel):
     branch: str
     tool: str
     total: int
     alerts: list[Alert]
+
+
+# --- Report schemas ---
+
+
+class ReportRequest(BaseModel):
+    scan_id: int | None = None
+    avg_engineer_hourly_cost: float = 75.0
+    avg_manual_fix_minutes: float = 30.0
+
+
+class ReportMeta(BaseModel):
+    report_type: str
+    title: str
+    generated_at: str
+    repo: str
+    scan_date: str
+
+
+# --- Replay schemas ---
+
+
+class ReplayEvent(BaseModel):
+    id: int
+    run_id: int
+    tool: str
+    event_type: str
+    detail: str
+    alert_number: int | None = None
+    timestamp_offset_ms: int
+    created_at: str
+
+
+class ReplayRun(BaseModel):
+    id: int
+    repo: str
+    scan_id: int | None = None
+    started_at: str
+    ended_at: str | None = None
+    status: str
+    tools: list[str]
+
+
+class ReplayRunWithEvents(ReplayRun):
+    events: list[ReplayEvent]
+    total_duration_ms: int | None = None

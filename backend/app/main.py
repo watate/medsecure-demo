@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.schemas import HealthResponse
-from app.routers import alerts, config, remediation, scans
+from app.routers import alerts, config, remediation, replay, reports, scans
 from app.services.database import init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,6 +44,8 @@ app.add_middleware(
 app.include_router(scans.router)
 app.include_router(alerts.router)
 app.include_router(remediation.router)
+app.include_router(reports.router)
+app.include_router(replay.router)
 app.include_router(config.router)
 
 
