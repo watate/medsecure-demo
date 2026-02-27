@@ -87,6 +87,44 @@ export interface HealthResponse {
   database: string;
 }
 
+// Report types
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type ReportData = Record<string, any>;
+
+export interface ReportHistoryItem {
+  id: number;
+  scan_id: number;
+  report_type: string;
+  created_at: string;
+}
+
+// Replay types
+export interface ReplayEvent {
+  id: number;
+  run_id: number;
+  tool: string;
+  event_type: string;
+  detail: string;
+  alert_number: number | null;
+  timestamp_offset_ms: number;
+  created_at: string;
+}
+
+export interface ReplayRun {
+  id: number;
+  repo: string;
+  scan_id: number | null;
+  started_at: string;
+  ended_at: string | null;
+  status: string;
+  tools: string[];
+}
+
+export interface ReplayRunWithEvents extends ReplayRun {
+  events: ReplayEvent[];
+  total_duration_ms: number | null;
+}
+
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -141,4 +179,29 @@ export const api = {
   listDevinSessions: () => fetchApi<DevinSession[]>("/api/remediate/devin/sessions"),
   refreshDevinSessions: () =>
     fetchApi<{ updated: number; total_running: number }>("/api/remediate/devin/refresh", { method: "POST" }),
+
+  // Reports
+  generateReport: (reportType: "ciso" | "cto", scanId?: number, avgCost?: number, avgMinutes?: number) =>
+    fetchApi<ReportData>(`/api/reports/generate/${reportType}`, {
+      method: "POST",
+      body: JSON.stringify({
+        scan_id: scanId ?? null,
+        avg_engineer_hourly_cost: avgCost ?? 75.0,
+        avg_manual_fix_minutes: avgMinutes ?? 30.0,
+      }),
+    }),
+  getLatestReport: (reportType: "ciso" | "cto") =>
+    fetchApi<ReportData>(`/api/reports/latest/${reportType}`),
+  listReports: (reportType?: string) => {
+    const params = reportType ? `?report_type=${reportType}` : "";
+    return fetchApi<ReportHistoryItem[]>(`/api/reports/history${params}`);
+  },
+
+  // Replay
+  listReplayRuns: () => fetchApi<ReplayRun[]>("/api/replay/runs"),
+  getReplayRun: (runId: number) => fetchApi<ReplayRunWithEvents>(`/api/replay/runs/${runId}`),
+  seedDemoReplay: () =>
+    fetchApi<{ run_id: number; events_created: number; message: string }>("/api/replay/demo-seed", {
+      method: "POST",
+    }),
 };

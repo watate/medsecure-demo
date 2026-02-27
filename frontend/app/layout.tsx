@@ -35,6 +35,12 @@ export default function RootLayout({
               <Link href="/remediation" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
                 Remediation
               </Link>
+              <Link href="/reports" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
+                Reports
+              </Link>
+              <Link href="/replay" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
+                Replay
+              </Link>
             </div>
           </div>
         </nav>
