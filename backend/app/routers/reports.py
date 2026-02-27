@@ -7,7 +7,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
-from app.models.schemas import ReportRequest
+from app.models.schemas import BranchSummary, ReportRequest
 from app.services.database import get_db
 from app.services.github_client import GitHubClient
 from app.services.report_generator import generate_ciso_report, generate_cto_report
@@ -50,8 +50,10 @@ async def _fetch_alerts_for_report(
     return baseline_dicts, tool_alerts_map
 
 
-async def _get_summaries_from_scan(scan_id: int | None) -> tuple[dict | None, dict | None, str]:
-    """Load scan summaries from DB. Returns (baseline_summary_dict, tool_summaries_dict, scan_date)."""
+async def _get_summaries_from_scan(
+    scan_id: int | None,
+) -> tuple[BranchSummary | None, dict[str, BranchSummary] | None, str]:
+    """Load scan summaries from DB. Returns (baseline_summary, tool_summaries, scan_date)."""
     db = await get_db()
     try:
         if scan_id:
@@ -68,10 +70,8 @@ async def _get_summaries_from_scan(scan_id: int | None) -> tuple[dict | None, di
         cursor = await db.execute("SELECT * FROM scan_branches WHERE scan_id = ?", (actual_scan_id,))
         rows = await cursor.fetchall()
 
-        from app.models.schemas import BranchSummary
-
-        baseline_summary = None
-        tool_summaries = {}
+        baseline_summary: BranchSummary | None = None
+        tool_summaries: dict[str, BranchSummary] = {}
         for row in rows:
             summary = BranchSummary(
                 branch=row["branch"],
