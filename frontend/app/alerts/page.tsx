@@ -287,7 +287,7 @@ export default function AlertsPage() {
                 {filteredAlerts.map((alert: Alert) => (
                   <a
                     key={alert.number}
-                    href={`${alert.html_url}?ref=refs/heads/${alerts.branch}`}
+                    href={alert.html_url}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="flex items-start gap-4 py-3 px-2 -mx-2 rounded-md hover:bg-muted/50 transition-colors"
