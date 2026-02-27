@@ -75,6 +75,13 @@ async def _get_summaries_from_scan(
         baseline_summary: BranchSummary | None = None
         tool_summaries: dict[str, BranchSummary] = {}
         for row in rows:
+            estimated_tokens = 0
+            try:
+                if "estimated_prompt_tokens" in row.keys():
+                    estimated_tokens = row["estimated_prompt_tokens"]
+            except Exception:
+                estimated_tokens = 0
+
             summary = BranchSummary(
                 branch=row["branch"],
                 tool=row["tool"],
@@ -87,6 +94,7 @@ async def _get_summaries_from_scan(
                 medium=row["medium"],
                 low=row["low"],
                 other=row["other"],
+                estimated_prompt_tokens=estimated_tokens,
             )
             if row["tool"] == "baseline":
                 baseline_summary = summary
