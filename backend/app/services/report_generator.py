@@ -14,8 +14,6 @@ from app.models.schemas import BranchSummary
 
 logger = logging.getLogger(__name__)
 
-# Industry benchmark: Veracode State of Software Security 2025
-INDUSTRY_MTTR_DAYS = 58
 
 
 def generate_ciso_report(
@@ -138,15 +136,6 @@ def generate_ciso_report(
 
         "severity_before_after": severity_before_after,
 
-        "industry_benchmark": {
-            "mttr_days": INDUSTRY_MTTR_DAYS,
-            "source": "Veracode State of Software Security 2025",
-            "note": (
-                f"Industry average MTTR is {INDUSTRY_MTTR_DAYS} days. "
-                "Automated remediation reduces this to minutes."
-            ),
-        },
-
         "verification": {
             "method": "CodeQL re-scan on each tool branch after fixes are pushed",
             "description": (
@@ -268,7 +257,7 @@ def generate_cto_report(
                 "CodeQL scan detects vulnerabilities on push",
                 "Platform fetches new alerts via GitHub API",
                 "Devin API creates automated fix sessions per alert",
-                "Fixes are tested in Devin's sandboxed environment"
+                "Fixes are tested in Devin's sandboxed environment",
                 "Fixes are pushed to tool-specific branches",
                 "CodeQL re-scans to verify fixes — no false claims",
             ],
