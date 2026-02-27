@@ -33,6 +33,10 @@ git checkout main
 git checkout -b tomcat-copilot && git push origin tomcat-copilot
 git checkout main
 git checkout -b tomcat-anthropic && git push origin tomcat-anthropic
+git checkout main
+git checkout -b tomcat-openai && git push origin tomcat-openai
+git checkout main
+git checkout -b tomcat-google && git push origin tomcat-google
 ```
 
 ### 2. Create a GitHub PAT
