@@ -58,6 +58,7 @@ class BranchSummary(BaseModel):
     medium: int
     low: int
     other: int
+    estimated_prompt_tokens: int = 0
 
 
 class ScanSnapshot(BaseModel):

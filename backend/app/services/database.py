@@ -34,7 +34,8 @@ async def init_db() -> None:
                 high INTEGER NOT NULL DEFAULT 0,
                 medium INTEGER NOT NULL DEFAULT 0,
                 low INTEGER NOT NULL DEFAULT 0,
-                other INTEGER NOT NULL DEFAULT 0
+                other INTEGER NOT NULL DEFAULT 0,
+                estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS alerts (
@@ -105,3 +106,13 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
             """
         )
+
+        # Lightweight migrations for existing local DBs
+        cursor = await db.execute("PRAGMA table_info(scan_branches)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "estimated_prompt_tokens" not in columns:
+            await db.execute(
+                "ALTER TABLE scan_branches ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+
+        await db.commit()

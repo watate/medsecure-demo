@@ -14,6 +14,14 @@ from app.models.schemas import BranchSummary
 
 logger = logging.getLogger(__name__)
 
+TOOL_DISPLAY_NAMES = {
+    "devin": "Devin",
+    "copilot": "Copilot",
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "gemini": "Google",
+}
+
 # Cost per million tokens (USD)
 # Anthropic claude-opus-4-6
 _ANTHROPIC_INPUT_COST_PER_MTOK = 5.0
@@ -31,11 +39,14 @@ _GEMINI_OUTPUT_COST_PER_MTOK = 12.0
 _ESTIMATED_INPUT_TOKENS_PER_ALERT = 4500
 
 
-def _estimate_api_cost(tool_name: str, alerts_processed: int) -> dict | None:
-    """Estimate the API cost for a tool based on number of alerts processed.
+def _estimate_api_cost(tool_name: str, alerts_processed: int, estimated_input_tokens: int | None = None) -> dict | None:
+    """Estimate the API cost for a tool.
 
-    Input tokens are estimated at ~4500 tokens per alert (full source file +
-    alert context + prompt instructions).
+    If `estimated_input_tokens` is provided, we use that as the dynamic token
+    estimate (built from the actual baseline alert context + source files).
+
+    Otherwise, we fall back to a rough per-alert estimate.
+
     Output tokens are assumed equal to input tokens as an approximation.
     """
     if tool_name == "anthropic":
@@ -53,7 +64,11 @@ def _estimate_api_cost(tool_name: str, alerts_processed: int) -> dict | None:
     else:
         return None
 
-    input_tokens = alerts_processed * _ESTIMATED_INPUT_TOKENS_PER_ALERT
+    if estimated_input_tokens and estimated_input_tokens > 0:
+        input_tokens = estimated_input_tokens
+    else:
+        input_tokens = alerts_processed * _ESTIMATED_INPUT_TOKENS_PER_ALERT
+
     output_tokens = input_tokens  # approximate: output ≈ input
 
     input_cost = (input_tokens / 1_000_000) * input_cost_per_mtok
@@ -143,7 +158,7 @@ def generate_ciso_report(
             perf["avg_seconds_per_fix"] = round(avg_secs, 1)
 
         # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, baseline_summary.open)
+        cost = _estimate_api_cost(tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens)
         if cost:
             perf["cost_estimate"] = cost
 
@@ -274,7 +289,7 @@ def generate_cto_report(
             entry["avg_time_per_fix"] = _format_duration(secs / total_fixed) if total_fixed > 0 else "N/A"
 
         # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, baseline_summary.open)
+        cost = _estimate_api_cost(tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens)
         if cost:
             entry["cost_estimate"] = cost
 
@@ -353,17 +368,19 @@ def _generate_recommendation(tool_matrix: dict, best_tool: str | None) -> dict:
         }
 
     best = tool_matrix[best_tool]
+    display_name = TOOL_DISPLAY_NAMES.get(best_tool, best_tool)
+
     return {
         "tool": best_tool,
         "summary": (
-            f"{best_tool.title()} achieved the highest fix rate at {best['fix_rate_pct']}% "
+            f"{display_name} achieved the highest fix rate at {best['fix_rate_pct']}% "
             f"with {best['human_intervention']} human intervention required."
         ),
         "details": (
-            f"{best_tool.title()} fixed {best['total_fixed']} alerts and introduced "
+            f"{display_name} fixed {best['total_fixed']} alerts and introduced "
             f"{best['new_alerts_introduced']} new alerts. "
             f"Based on fix rate, automation level, and code quality, "
-            f"{best_tool.title()} is recommended for automated CodeQL remediation."
+            f"{display_name} is recommended for automated CodeQL remediation."
         ),
     }
 
