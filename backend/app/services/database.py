@@ -1,0 +1,76 @@
+import aiosqlite
+
+from app.config import settings
+
+DB_PATH = settings.database_path
+
+
+async def get_db() -> aiosqlite.Connection:
+    db = await aiosqlite.connect(DB_PATH)
+    db.row_factory = aiosqlite.Row
+    return db
+
+
+async def init_db() -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS scan_branches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL REFERENCES scans(id),
+                branch TEXT NOT NULL,
+                tool TEXT NOT NULL,
+                total INTEGER NOT NULL DEFAULT 0,
+                open INTEGER NOT NULL DEFAULT 0,
+                fixed INTEGER NOT NULL DEFAULT 0,
+                dismissed INTEGER NOT NULL DEFAULT 0,
+                critical INTEGER NOT NULL DEFAULT 0,
+                high INTEGER NOT NULL DEFAULT 0,
+                medium INTEGER NOT NULL DEFAULT 0,
+                low INTEGER NOT NULL DEFAULT 0,
+                other INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL REFERENCES scans(id),
+                branch TEXT NOT NULL,
+                alert_number INTEGER NOT NULL,
+                rule_id TEXT NOT NULL,
+                rule_description TEXT NOT NULL DEFAULT '',
+                severity TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL,
+                tool TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL DEFAULT '',
+                start_line INTEGER NOT NULL DEFAULT 0,
+                end_line INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                html_url TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                dismissed_at TEXT,
+                fixed_at TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS devin_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL UNIQUE,
+                alert_number INTEGER NOT NULL,
+                rule_id TEXT NOT NULL,
+                file_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'running',
+                pr_url TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
+            CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
+            CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
+            """
+        )

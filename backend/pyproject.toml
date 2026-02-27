@@ -1,7 +1,29 @@
 [project]
-name = "backend"
+name = "medsecure-backend"
 version = "0.1.0"
-description = "Add your description here"
+description = "MedSecure CodeQL remediation comparison backend"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "httpx>=0.27.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "aiosqlite>=0.20.0",
+    "boto3>=1.35.0",
+    "apscheduler>=3.10.0",
+    "python-dotenv>=1.0.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.4",
+]
