@@ -131,7 +131,7 @@ def generate_ciso_report(
             perf["avg_seconds_per_fix"] = round(avg_secs, 1)
 
         # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, summary.total)
+        cost = _estimate_api_cost(tool_name, baseline_summary.open)
         if cost:
             perf["cost_estimate"] = cost
 
@@ -260,7 +260,7 @@ def generate_cto_report(
             entry["avg_time_per_fix"] = _format_duration(secs / total_fixed) if total_fixed > 0 else "N/A"
 
         # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, summary.total)
+        cost = _estimate_api_cost(tool_name, baseline_summary.open)
         if cost:
             entry["cost_estimate"] = cost
 
