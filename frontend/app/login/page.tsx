@@ -62,7 +62,7 @@ export default function LoginPage() {
             <CardHeader>
               <CardTitle>Sign In</CardTitle>
               <CardDescription>
-                Sign in to access the CodeQL remediation dashboard
+                Sign in to access the Cognition CodeQL remediation dashboard
               </CardDescription>
             </CardHeader>
             <CardContent>

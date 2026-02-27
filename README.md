@@ -66,8 +66,8 @@ npm install
 # Create auth database tables
 npx @better-auth/cli migrate
 
-# Seed a user
-SEED_EMAIL=admin@example.com SEED_PASSWORD=your-password npm run seed
+# Seed a user by adding details to frontend/.env, then run:
+npm run seed
 ```
 
 ### 5. Run locally
