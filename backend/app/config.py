@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     s3_backup_bucket: str = ""
     aws_region: str = "ap-southeast-1"
 
-    # Auth — Next.js frontend URL for session validation
-    next_auth_url: str = "http://localhost:3000"
+    # Auth — path to better-auth SQLite database
+    auth_db_path: str = "../frontend/auth.db"
 
     # CORS
     cors_origins: str = "*"

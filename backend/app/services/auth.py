@@ -1,13 +1,29 @@
-"""Validate Better Auth session tokens by calling the Next.js auth API."""
+"""Validate Better Auth session tokens directly against the auth SQLite database.
+
+Follows the pattern from ktph-backend: direct DB lookup with a TTL cache
+instead of making HTTP calls to the frontend.
+"""
 
 import logging
+import sqlite3
+import time
 
-import httpx
 from fastapi import Depends, HTTPException, Request
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Simple TTL cache: {token: (user_dict, expiry_timestamp)}
+_cache: dict[str, tuple[dict, float]] = {}
+_CACHE_TTL = 60  # seconds
+
+
+def _get_auth_db() -> sqlite3.Connection:
+    """Open a connection to the better-auth SQLite database."""
+    conn = sqlite3.connect(settings.auth_db_path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 async def get_session_token(request: Request) -> str:
@@ -32,24 +48,45 @@ async def get_session_token(request: Request) -> str:
 async def validate_session(
     token: str = Depends(get_session_token),
 ) -> dict:
-    """Validate a Better Auth session token against the Next.js auth API.
+    """Validate a Better Auth session token against the auth database.
+
+    Better Auth tokens are formatted as "{token}.{signature}" —
+    only the part before the dot is stored in the DB.
 
     Returns the user dict if valid, raises 401 otherwise.
     """
+    # Extract the DB token (before the dot)
+    db_token = token.split(".")[0]
+
+    # Check cache first
+    if db_token in _cache:
+        user, expires = _cache[db_token]
+        if time.monotonic() < expires:
+            return user
+        del _cache[db_token]
+
+    # Query the auth database directly
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{settings.next_auth_url}/api/auth/get-session",
-                headers={
-                    "Cookie": f"better-auth.session_token={token}",
-                },
+        conn = _get_auth_db()
+        try:
+            cursor = conn.execute(
+                """
+                SELECT u.id AS user_id, u.name, u.email
+                FROM session s
+                JOIN user u ON s.userId = u.id
+                WHERE s.token = ? AND s.expiresAt > datetime('now')
+                """,
+                (db_token,),
             )
-            if resp.status_code == 200:
-                data = resp.json()
-                user = data.get("user")
-                if user:
-                    return user
-    except httpx.RequestError:
-        logger.exception("Failed to validate session against Next.js auth")
+            row = cursor.fetchone()
+        finally:
+            conn.close()
+
+        if row:
+            user = dict(row)
+            _cache[db_token] = (user, time.monotonic() + _CACHE_TTL)
+            return user
+    except sqlite3.OperationalError:
+        logger.exception("Failed to query auth database at %s", settings.auth_db_path)
 
     raise HTTPException(status_code=401, detail="Invalid or expired session")

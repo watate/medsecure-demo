@@ -5,7 +5,8 @@ Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs
 ## Architecture
 
 - **Backend**: FastAPI + SQLite — fetches CodeQL alerts via GitHub API, triggers Devin remediation sessions
-- **Frontend**: Next.js + shadcn/ui — dashboard comparing alert counts per tool, alert browser, remediation log
+- **Frontend**: Next.js + shadcn/ui — dashboard, alert browser, remediation log, reports, replay
+- **Auth**: [better-auth](https://www.better-auth.com/) with SQLite — email/password login, session cookies
 - **Infra**: Terraform (EC2 + S3), Docker Compose (Caddy + API + Web), GitHub Actions CI/CD
 
 ## Quick Start (Local)
@@ -47,22 +48,29 @@ Or a classic PAT with scopes: `repo`, `security_events`.
 ### 3. Configure environment
 
 ```bash
+# Backend
 cp backend/.env.example backend/.env
+# Edit backend/.env — set GITHUB_TOKEN, GITHUB_REPO, DEVIN_API_KEY, etc.
+
+# Frontend
+cp frontend/.env.example frontend/.env
+# Edit frontend/.env — set BETTER_AUTH_SECRET (generate with: openssl rand -hex 32)
 ```
 
-Edit `backend/.env`:
+### 4. Set up auth
 
-```
-GITHUB_TOKEN=ghp_your_token_here
-GITHUB_REPO=your-org/your-repo
-DEVIN_API_KEY=your_devin_api_key
-BRANCH_BASELINE=main
-BRANCH_DEVIN=tomcat-devin
-BRANCH_COPILOT=tomcat-copilot
-BRANCH_ANTHROPIC=tomcat-anthropic
+```bash
+cd frontend
+npm install
+
+# Create auth database tables
+npx @better-auth/cli migrate
+
+# Seed a user
+SEED_EMAIL=admin@example.com SEED_PASSWORD=your-password npm run seed
 ```
 
-### 4. Run locally
+### 5. Run locally
 
 ```bash
 # Backend
@@ -72,11 +80,10 @@ uv run fastapi dev app/main.py
 
 # Frontend (separate terminal)
 cd frontend
-npm install
 npm run dev
 ```
 
-Open http://localhost:3000. Click "Run New Scan" to fetch CodeQL alerts.
+Open http://localhost:3000. Sign in with your seeded credentials, then click "Run New Scan" to fetch CodeQL alerts.
 
 ## Deploy to AWS
 
@@ -118,9 +125,11 @@ SQLite database is stored on a Docker volume at `/data/medsecure.db` and backed 
 
 ## API Endpoints
 
+All endpoints except `/api/health` require authentication (better-auth session cookie).
+
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/health` | Health check |
+| GET | `/api/health` | Health check (public) |
 | GET | `/api/config` | Current repo/branch config |
 | POST | `/api/scans/trigger` | Fetch CodeQL alerts for all branches |
 | GET | `/api/scans` | List scan snapshots |
@@ -128,18 +137,37 @@ SQLite database is stored on a Docker volume at `/data/medsecure.db` and backed 
 | GET | `/api/alerts/live?tool=baseline` | Live alerts from GitHub API |
 | POST | `/api/remediate/devin` | Create Devin sessions to fix alerts |
 | GET | `/api/remediate/devin/sessions` | List Devin sessions |
+| POST | `/api/reports/generate/{type}` | Generate CISO or CTO report |
+| GET | `/api/reports/latest/{type}` | Get latest report by type |
+| GET | `/api/replay/runs` | List replay runs |
+| GET | `/api/replay/runs/{id}` | Get replay run with events |
+| POST | `/api/replay/demo-seed` | Seed demo replay data |
 
 ## Environment Variables
+
+See `backend/.env.example` and `frontend/.env.example` for full reference.
+
+### Backend
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GITHUB_TOKEN` | Yes | GitHub PAT with code scanning access |
 | `GITHUB_REPO` | Yes | Target repo (e.g. `owner/repo`) |
 | `DEVIN_API_KEY` | For remediation | Devin API key |
+| `AUTH_DB_PATH` | No | Path to better-auth SQLite database (default: `../frontend/auth.db`) |
+| `CORS_ORIGINS` | No | Allowed origins (default: `http://localhost:3000`) |
 | `BRANCH_BASELINE` | No | Baseline branch (default: `main`) |
 | `BRANCH_DEVIN` | No | Devin fix branch (default: `tomcat-devin`) |
 | `BRANCH_COPILOT` | No | Copilot fix branch (default: `tomcat-copilot`) |
 | `BRANCH_ANTHROPIC` | No | Anthropic fix branch (default: `tomcat-anthropic`) |
 | `DATABASE_PATH` | No | SQLite path (default: `medsecure.db`) |
 | `S3_BACKUP_BUCKET` | For backups | S3 bucket name |
+
+### Frontend
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BETTER_AUTH_SECRET` | Yes | Random secret for encryption (`openssl rand -hex 32`) |
+| `BETTER_AUTH_URL` | Yes | Base URL of the frontend (e.g. `http://localhost:3000`) |
+| `NEXT_PUBLIC_API_URL` | No | Backend API URL (default: `http://localhost:8000`) |
 
