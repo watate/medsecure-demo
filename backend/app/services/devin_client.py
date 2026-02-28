@@ -16,8 +16,9 @@ _BASE_BACKOFF_SECONDS = 5.0
 class DevinClient:
     """Client for the Devin v3 Organization API.
 
-    Uses /v3/organizations/{org_id}/sessions endpoints.
+    Uses https://api.devin.ai/v3/organizations/{org_id}/sessions endpoints.
     Requires DEVIN_API_KEY (service user credential) and DEVIN_ORG_ID.
+    Retries on 429 with exponential backoff.
     """
 
     def __init__(self, api_key: str | None = None, org_id: str | None = None):
