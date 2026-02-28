@@ -426,7 +426,7 @@ async def compare_latest(
                 f"Assumes ~0.09 ACU per session, {session_count} sessions "
                 f"({baseline.open} alerts grouped into {session_count} files)"
             ) if baseline.unique_file_count > 0 else (
-                f"Assumes ~0.09 ACU per session (1 session per alert)"
+                f"Assumes ~0.09 ACU per session (1 session per unique file)"
             )
             cost_estimates[tool_name] = CostEstimate(
                 model="Devin (ACU-based)",
