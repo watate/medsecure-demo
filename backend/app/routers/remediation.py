@@ -19,6 +19,9 @@ from app.models.schemas import (
     CopilotAutofixRequest,
     CopilotAutofixResponse,
     DevinSession,
+    RegressionTestJob,
+    RegressionTestRequest,
+    RegressionTestResponse,
     RemediationRequest,
     RemediationResponse,
 )
@@ -2326,3 +2329,354 @@ async def cancel_benchmark(
         await db.close()
 
     return {"status": "cancelled", "run_id": run_id}
+
+
+# ---------------------------------------------------------------------------
+# Regression Testing — run tests on each tool branch via Devin machine snapshot
+# ---------------------------------------------------------------------------
+
+# Devin session terminal states for regression test polling
+_REGRESSION_TERMINAL_STATUSES = {"finished", "stopped", "error", "blocked"}
+
+REGRESSION_POLL_INTERVAL = 30.0  # seconds between status checks
+REGRESSION_MAX_WAIT = 30 * 60    # 30 minutes max wait per session
+
+
+def _build_regression_prompt(
+    repo: str, branch: str, test_command: str,
+) -> str:
+    """Build a prompt that tells Devin to checkout a branch and run tests."""
+    return (
+        f"Run the following regression test on the repository `{repo}`, branch `{branch}`.\n\n"
+        f"Steps:\n"
+        f"1. The repo should already be cloned on this machine. If not, clone it.\n"
+        f"2. Checkout the `{branch}` branch and pull the latest changes: "
+        f"`git fetch origin {branch} && git checkout {branch} && git pull origin {branch}`\n"
+        f"3. Run the test command: `{test_command}`\n"
+        f"4. Wait for the command to complete.\n"
+        f"5. Report the full test output — include all warnings, errors, and the final "
+        f"summary line. If the build fails, include the failure reason.\n\n"
+        f"Do NOT fix any issues. Just run the test and report results."
+    )
+
+
+async def _poll_regression_session(
+    devin: DevinClient,
+    session_id: str,
+) -> dict:
+    """Poll a Devin session until it finishes or times out.
+
+    Returns the final session status dict (v1 format).
+    """
+    deadline = _time.monotonic() + REGRESSION_MAX_WAIT
+    while _time.monotonic() < deadline:
+        await asyncio.sleep(REGRESSION_POLL_INTERVAL)
+        status_data = await devin.get_session_status_v1(session_id)
+        status_enum = status_data.get("status_enum", "")
+        if status_enum in _REGRESSION_TERMINAL_STATUSES:
+            return status_data
+    # Timed out — return last known status
+    return await devin.get_session_status_v1(session_id)
+
+
+def _extract_last_devin_message(status_data: dict) -> str:
+    """Extract the last message from Devin (not the user) from session data."""
+    messages = status_data.get("messages", [])
+    for msg in reversed(messages):
+        if msg.get("role") == "devin":
+            return msg.get("message", "") or msg.get("content", "")
+    return ""
+
+
+async def _run_regression_tests_background(
+    resolved_repo: str,
+    tool_branches: dict[str, str],
+    test_command: str,
+    snapshot_id: str,
+) -> None:
+    """Background task: create Devin sessions for each branch, poll for results."""
+    devin = DevinClient()
+    db = await get_db()
+
+    try:
+        for tool_name, branch in tool_branches.items():
+            prompt = _build_regression_prompt(resolved_repo, branch, test_command)
+            title = f"Regression test: {tool_name} ({branch})"
+
+            try:
+                result = await devin.create_snapshot_session(
+                    prompt=prompt,
+                    snapshot_id=snapshot_id,
+                    title=title,
+                )
+                session_id = result.get("session_id", "")
+                session_url = result.get("url", "")
+
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """INSERT INTO regression_test_jobs
+                       (repo, tool, branch, session_id, session_url, status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'running', ?, ?)""",
+                    (resolved_repo, tool_name, branch, session_id, session_url, now, now),
+                )
+                await db.commit()
+
+                logger.info(
+                    "Created regression test session %s for %s (%s)",
+                    session_id, tool_name, branch,
+                )
+            except Exception as e:
+                logger.exception(
+                    "Failed to create regression test session for %s (%s)",
+                    tool_name, branch,
+                )
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """INSERT INTO regression_test_jobs
+                       (repo, tool, branch, session_id, session_url, status,
+                        result_message, created_at, updated_at)
+                       VALUES (?, ?, ?, '', '', 'failed', ?, ?, ?)""",
+                    (resolved_repo, tool_name, branch, str(e)[:500], now, now),
+                )
+                await db.commit()
+
+            # Rate-limit-aware stagger between session launches
+            await asyncio.sleep(2.0)
+
+        # Poll all running sessions until they complete
+        cursor = await db.execute(
+            "SELECT id, session_id FROM regression_test_jobs "
+            "WHERE repo = ? AND status = 'running' AND session_id != ''",
+            (resolved_repo,),
+        )
+        running_jobs = await cursor.fetchall()
+
+        for job in running_jobs:
+            job_id = job["id"]
+            session_id = job["session_id"]
+            try:
+                status_data = await _poll_regression_session(devin, session_id)
+                status_enum = status_data.get("status_enum", "unknown")
+                last_message = _extract_last_devin_message(status_data)
+                structured = status_data.get("structured_output")
+
+                final_status = "completed" if status_enum == "finished" else "failed"
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """UPDATE regression_test_jobs
+                       SET status = ?, result_message = ?,
+                           structured_output = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        final_status,
+                        last_message[:10000] if last_message else None,
+                        json.dumps(structured) if structured else None,
+                        now,
+                        job_id,
+                    ),
+                )
+                await db.commit()
+            except Exception as e:
+                logger.exception(
+                    "Failed to poll regression test session %s", session_id,
+                )
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """UPDATE regression_test_jobs
+                       SET status = 'failed', result_message = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (f"Polling error: {str(e)[:500]}", now, job_id),
+                )
+                await db.commit()
+    except Exception:
+        logger.exception("Regression test background task failed")
+    finally:
+        await db.close()
+
+
+@router.post("/regression-test", response_model=RegressionTestResponse)
+async def trigger_regression_tests(
+    request: RegressionTestRequest,
+    background_tasks: BackgroundTasks,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> RegressionTestResponse:
+    """Trigger regression tests on each tool branch via Devin machine snapshot.
+
+    For each remediate/{tool}-* branch, creates a Devin session using the
+    configured machine snapshot and runs the test command. Results are
+    polled and stored for display on the frontend.
+    """
+    if not settings.devin_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="DEVIN_API_KEY must be configured for regression testing",
+        )
+    if not settings.devin_snapshot_id:
+        raise HTTPException(
+            status_code=400,
+            detail="DEVIN_SNAPSHOT_ID must be configured for regression testing",
+        )
+
+    resolved_repo = await resolve_repo(repo)
+
+    # Resolve tool branches
+    if request.run_id:
+        # Get branches from a specific benchmark run's replay events
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT tools, branch_name FROM replay_runs WHERE id = ?",
+                (request.run_id,),
+            )
+            row = await cursor.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Run {request.run_id} not found",
+                )
+            # For benchmark runs, branch_name is null — branches are in events
+            cursor = await db.execute(
+                """SELECT DISTINCT json_extract(metadata, '$.branch') as branch,
+                          tool
+                   FROM replay_events
+                   WHERE run_id = ?
+                     AND json_extract(metadata, '$.branch') IS NOT NULL
+                     AND tool != 'benchmark'""",
+                (request.run_id,),
+            )
+            rows = await cursor.fetchall()
+            tool_branches: dict[str, str] = {}
+            for r in rows:
+                branch_val = r["branch"]
+                tool_val = r["tool"]
+                if branch_val and tool_val and tool_val not in tool_branches:
+                    tool_branches[tool_val] = branch_val
+        finally:
+            await db.close()
+    else:
+        # Fall back to latest known tool branches
+        from app.services.repo_resolver import get_latest_tool_branches
+        tool_branches = await get_latest_tool_branches(resolved_repo)
+
+    if not tool_branches:
+        raise HTTPException(
+            status_code=404,
+            detail="No tool branches found. Run a benchmark first.",
+        )
+
+    # Launch background task
+    background_tasks.add_task(
+        _run_regression_tests_background,
+        resolved_repo,
+        tool_branches,
+        request.test_command,
+        settings.devin_snapshot_id,
+    )
+
+    return RegressionTestResponse(
+        total=len(tool_branches),
+        jobs=[],
+        message=(
+            f"Regression tests started for {len(tool_branches)} branches: "
+            f"{', '.join(tool_branches.keys())}. "
+            f"Poll GET /api/remediate/regression-tests for results."
+        ),
+    )
+
+
+@router.get("/regression-tests", response_model=list[RegressionTestJob])
+async def list_regression_tests(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> list[RegressionTestJob]:
+    """List regression test jobs for a repo."""
+    resolved_repo = await resolve_repo(repo)
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT * FROM regression_test_jobs WHERE repo = ? ORDER BY created_at DESC",
+            (resolved_repo,),
+        )
+        rows = await cursor.fetchall()
+        return [
+            RegressionTestJob(
+                id=row["id"],
+                repo=row["repo"],
+                tool=row["tool"],
+                branch=row["branch"],
+                session_id=row["session_id"],
+                session_url=row["session_url"],
+                status=row["status"],
+                result_message=row["result_message"],
+                structured_output=json.loads(row["structured_output"])
+                if row["structured_output"]
+                else None,
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+    finally:
+        await db.close()
+
+
+@router.post("/regression-tests/refresh")
+async def refresh_regression_tests(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> dict[str, int]:
+    """Refresh status of running regression test sessions from the Devin API.
+
+    Polls each running session's status and updates the database with the
+    latest result message. Useful for manual refresh from the frontend
+    without waiting for the background task to complete.
+    """
+    resolved_repo = await resolve_repo(repo)
+    devin = DevinClient()
+    db = await get_db()
+    updated = 0
+
+    try:
+        cursor = await db.execute(
+            "SELECT id, session_id FROM regression_test_jobs "
+            "WHERE repo = ? AND status = 'running' AND session_id != ''",
+            (resolved_repo,),
+        )
+        running_jobs = await cursor.fetchall()
+
+        for job in running_jobs:
+            job_id = job["id"]
+            session_id = job["session_id"]
+            try:
+                status_data = await devin.get_session_status_v1(session_id)
+                status_enum = status_data.get("status_enum", "")
+                last_message = _extract_last_devin_message(status_data)
+                structured = status_data.get("structured_output")
+
+                if status_enum in _REGRESSION_TERMINAL_STATUSES:
+                    final_status = "completed" if status_enum == "finished" else "failed"
+                else:
+                    final_status = "running"
+
+                now = datetime.now(timezone.utc).isoformat()
+                await db.execute(
+                    """UPDATE regression_test_jobs
+                       SET status = ?, result_message = ?,
+                           structured_output = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (
+                        final_status,
+                        last_message[:10000] if last_message else None,
+                        json.dumps(structured) if structured else None,
+                        now,
+                        job_id,
+                    ),
+                )
+                updated += 1
+            except Exception:
+                logger.exception(
+                    "Failed to refresh regression test session %s", session_id,
+                )
+
+        await db.commit()
+        return {"updated": updated, "total_running": len(running_jobs)}
+    finally:
+        await db.close()

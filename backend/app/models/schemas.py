@@ -283,6 +283,34 @@ class BenchmarkResponse(BaseModel):
     message: str
 
 
+# --- Regression Test schemas ---
+
+
+class RegressionTestRequest(BaseModel):
+    run_id: int | None = None  # optional: resolve branches from a benchmark run
+    test_command: str = "ant -Dexecute.spotbugs=true spotbugs"
+
+
+class RegressionTestJob(BaseModel):
+    id: int
+    repo: str
+    tool: str
+    branch: str
+    session_id: str
+    session_url: str
+    status: str  # pending, running, completed, failed
+    result_message: str | None = None
+    structured_output: dict[str, object] | None = None
+    created_at: str
+    updated_at: str
+
+
+class RegressionTestResponse(BaseModel):
+    total: int
+    jobs: list[RegressionTestJob]
+    message: str
+
+
 # --- Replay schemas ---
 
 
