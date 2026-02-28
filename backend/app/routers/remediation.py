@@ -1160,8 +1160,12 @@ CODEQL_MAX_WAIT = 20 * 60  # 20 minutes max wait for CodeQL analysis
 
 # Devin session polling configuration
 DEVIN_POLL_INTERVAL = 30.0  # seconds between Devin session status checks
-DEVIN_MAX_WAIT = 30 * 60   # 30 minutes max wait for Devin sessions
+DEVIN_MAX_WAIT = 30 * 60   # 30 minutes max wait for a single Devin session
 DEVIN_TERMINAL_STATES = {"exit", "error", "suspended"}
+# status_detail values that indicate the session is effectively done
+# (e.g. "waiting_for_user" means Devin finished its work and is waiting for
+# human input which won't come in an automated benchmark)
+DEVIN_TERMINAL_STATUS_DETAILS = {"waiting_for_user"}
 
 # In-memory cancel events for running benchmarks (run_id -> asyncio.Event)
 _cancel_events: dict[int, asyncio.Event] = {}
@@ -1379,6 +1383,24 @@ async def _benchmark_api_tool(
         await db.close()
 
 
+def _is_devin_session_done(status_data: dict) -> tuple[bool, str]:
+    """Return (is_done, effective_status) for a Devin session response.
+
+    A session is considered done when:
+    - ``status`` is in DEVIN_TERMINAL_STATES (exit/error/suspended), OR
+    - ``status_detail`` is in DEVIN_TERMINAL_STATUS_DETAILS (e.g.
+      "waiting_for_user" — means Devin finished its work and is waiting
+      for human input that won't come in an automated benchmark).
+    """
+    status = status_data.get("status", "unknown")
+    if status in DEVIN_TERMINAL_STATES:
+        return True, status
+    status_detail = status_data.get("status_detail", "")
+    if status_detail in DEVIN_TERMINAL_STATUS_DETAILS:
+        return True, f"{status}:{status_detail}"
+    return False, status
+
+
 async def _benchmark_devin(
     run_id: int,
     alerts: list[Alert],
@@ -1388,12 +1410,14 @@ async def _benchmark_devin(
     branch_name: str | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> None:
-    """Background task: run Devin remediation, poll for completion, and record commits.
+    """Background task: run Devin remediation sequentially (one session at a time).
 
-    Three phases:
-    1. Create Devin sessions (one per file group)
-    2. Poll sessions until all reach a terminal state (exit/error/suspended)
-    3. Detect new commits on the branch and record patch_applied events
+    For each file group:
+    1. Create a Devin session
+    2. Poll until the session reaches a terminal state
+    3. Detect new commits pushed by that session and record patch_applied events
+
+    Sessions are created one at a time to avoid Devin rate limits.
     """
     if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
@@ -1429,7 +1453,8 @@ async def _benchmark_devin(
         event_type="scan_started",
         detail=(
             f"Starting Devin remediation for {len(alerts)} alerts "
-            f"across {len(file_groups)} files on {branch_name}"
+            f"across {len(file_groups)} files on {branch_name} "
+            f"(sequential — 1 session at a time)"
         ),
         metadata={
             "repo": resolved_repo,
@@ -1441,40 +1466,45 @@ async def _benchmark_devin(
 
     db = await get_db()
     sessions_created = 0
-    # Map session_id -> (file_path, alert list) for tracking
-    session_map: dict[str, tuple[str, list[Alert]]] = {}
+    total_commits = 0
+    failed = 0
+    # Collect all session info for the final summary
+    all_sessions: list[dict] = []  # {session_id, file_path, status, url}
 
     try:
         # Capture branch HEAD before Devin pushes any commits
-        initial_branch_sha = await github.get_branch_sha(branch_name)
+        last_known_sha = await github.get_branch_sha(branch_name)
 
-        # ---- Phase 1: Create Devin sessions ----
+        # ---- Process each file group sequentially ----
         for idx, (file_path, file_alerts) in enumerate(file_groups.items()):
             # Check for cancellation before each session
             if cancel_event and cancel_event.is_set():
                 await recorder.record(
                     tool="devin",
                     event_type="cancelled",
-                    detail=f"Devin cancelled after {sessions_created} session(s) created",
+                    detail=f"Devin cancelled after {sessions_created}/{len(file_groups)} session(s)",
                     metadata={"sessions_created": sessions_created},
                 )
                 break
 
-            # Stagger Devin session creation to avoid 429 rate limits
-            if idx > 0:
-                await asyncio.sleep(3.0)
-
+            # -- Step 1: Create the session --
+            session_id = ""
             try:
                 await recorder.record(
                     tool="devin",
                     event_type="session_created",
-                    detail=f"Creating Devin session for {len(file_alerts)} alert(s) in {file_path}",
+                    detail=(
+                        f"[{idx + 1}/{len(file_groups)}] Creating Devin session "
+                        f"for {len(file_alerts)} alert(s) in {file_path}"
+                    ),
                     alert_number=file_alerts[0].number,
                     metadata={
                         "file_path": file_path,
                         "alert_count": len(file_alerts),
                         "alert_numbers": [a.number for a in file_alerts],
                         "branch": branch_name,
+                        "session_index": idx + 1,
+                        "total_sessions": len(file_groups),
                     },
                 )
 
@@ -1497,15 +1527,25 @@ async def _benchmark_devin(
                     )
                 await db.commit()
 
-                session_map[session_id] = (file_path, file_alerts)
+                session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
+                all_sessions.append({
+                    "session_id": session_id,
+                    "file_path": file_path,
+                    "status": "running",
+                    "url": session_url,
+                })
 
                 await recorder.record(
                     tool="devin",
                     event_type="analyzing",
-                    detail=f"Devin session {session_id} started for {len(file_alerts)} alert(s) in {file_path}",
+                    detail=(
+                        f"[{idx + 1}/{len(file_groups)}] Devin session started "
+                        f"for {file_path}"
+                    ),
                     alert_number=file_alerts[0].number,
                     metadata={
                         "session_id": session_id,
+                        "session_url": session_url,
                         "file_path": file_path,
                         "branch": branch_name,
                     },
@@ -1513,7 +1553,7 @@ async def _benchmark_devin(
                 sessions_created += 1
 
             except Exception as e:
-                logger.exception("Benchmark devin: failed for %s", file_path)
+                logger.exception("Benchmark devin: failed to create session for %s", file_path)
                 await recorder.record(
                     tool="devin",
                     event_type="error",
@@ -1521,208 +1561,170 @@ async def _benchmark_devin(
                     alert_number=file_alerts[0].number,
                     metadata={"error": str(e)[:500], "file_path": file_path},
                 )
+                failed += len(file_alerts)
+                continue  # Skip to next file group
 
-        # If cancelled during creation or no sessions were created, skip polling
-        if (cancel_event and cancel_event.is_set()) or not session_map:
-            completed = 0
-            failed = len(alerts) if not session_map else 0
-        else:
-            # ---- Phase 2: Poll sessions until all reach terminal state ----
-            await recorder.record(
-                tool="devin",
-                event_type="polling_started",
-                detail=(
-                    f"Polling {len(session_map)} Devin session(s) for completion "
-                    f"(timeout: {DEVIN_MAX_WAIT // 60}min)"
-                ),
-                metadata={
-                    "session_ids": list(session_map.keys()),
-                    "timeout_s": DEVIN_MAX_WAIT,
-                },
-            )
-
-            finished_sessions: dict[str, str] = {}  # session_id -> terminal status
+            # -- Step 2: Poll this session until done --
             poll_start = _time.monotonic()
+            session_done = False
+            effective_status = "unknown"
 
-            while len(finished_sessions) < len(session_map):
-                # Check for cancellation
+            while not session_done:
                 if cancel_event and cancel_event.is_set():
                     await recorder.record(
                         tool="devin",
                         event_type="cancelled",
-                        detail=(
-                            f"Devin polling cancelled — "
-                            f"{len(finished_sessions)}/{len(session_map)} sessions finished"
-                        ),
-                        metadata={"finished": dict(finished_sessions)},
+                        detail=f"Cancelled while polling session {session_id}",
+                        metadata={"session_id": session_id},
                     )
                     break
 
-                # Check timeout
                 elapsed = _time.monotonic() - poll_start
                 if elapsed > DEVIN_MAX_WAIT:
-                    not_done = [
-                        sid for sid in session_map if sid not in finished_sessions
-                    ]
                     logger.warning(
-                        "Benchmark %d: Devin polling timed out after %.0fs. "
-                        "Unfinished sessions: %s",
-                        run_id, elapsed, not_done,
+                        "Benchmark %d: Devin session %s timed out after %.0fs",
+                        run_id, session_id, elapsed,
                     )
                     await recorder.record(
                         tool="devin",
                         event_type="polling_timeout",
                         detail=(
-                            f"Devin polling timed out after {int(elapsed)}s — "
-                            f"{len(finished_sessions)}/{len(session_map)} sessions finished"
+                            f"Session {session_id} timed out after "
+                            f"{int(elapsed)}s for {file_path}"
                         ),
+                        alert_number=file_alerts[0].number,
                         metadata={
-                            "finished": dict(finished_sessions),
-                            "unfinished": not_done,
+                            "session_id": session_id,
                             "elapsed_s": int(elapsed),
+                            "file_path": file_path,
                         },
                     )
+                    failed += len(file_alerts)
                     break
 
-                # Poll each unfinished session
-                for session_id in session_map:
-                    if session_id in finished_sessions:
-                        continue
-                    try:
-                        status_data = await devin.get_session_status(session_id)
-                        status = status_data.get("status", "unknown")
+                await asyncio.sleep(DEVIN_POLL_INTERVAL)
 
-                        if status in DEVIN_TERMINAL_STATES:
-                            finished_sessions[session_id] = status
-                            file_path, file_alerts = session_map[session_id]
+                try:
+                    status_data = await devin.get_session_status(session_id)
+                    session_done, effective_status = _is_devin_session_done(status_data)
 
-                            # Compute cost from ACUs consumed
-                            acus = status_data.get("acus_consumed")
-                            cost = compute_devin_session_cost(acus) if acus else 0.0
+                    if session_done:
+                        acus = status_data.get("acus_consumed")
+                        cost = compute_devin_session_cost(acus) if acus else 0.0
+                        session_url = status_data.get("url", session_url)
 
-                            await recorder.record(
-                                tool="devin",
-                                event_type="session_complete",
-                                detail=(
-                                    f"Devin session {session_id} finished "
-                                    f"with status '{status}' for {file_path}"
-                                ),
-                                alert_number=file_alerts[0].number,
-                                metadata={
-                                    "session_id": session_id,
-                                    "status": status,
-                                    "file_path": file_path,
-                                    "acus_consumed": acus,
-                                    "session_url": status_data.get("url", ""),
-                                },
-                                cost_usd=cost,
-                            )
+                        # Update the session info we track
+                        for s in all_sessions:
+                            if s["session_id"] == session_id:
+                                s["status"] = effective_status
+                                s["url"] = session_url
 
-                            # Update devin_sessions table
-                            prs = status_data.get("pull_requests", [])
-                            pr_url = prs[0].get("pr_url") if prs else None
-                            await db.execute(
-                                """UPDATE devin_sessions
-                                   SET status = ?, pr_url = ?,
-                                       acus = COALESCE(?, acus),
-                                       updated_at = datetime('now')
-                                   WHERE repo = ? AND session_id = ?""",
-                                (status, pr_url, acus, resolved_repo, session_id),
-                            )
-                            await db.commit()
-
-                    except Exception as e:
-                        logger.warning(
-                            "Benchmark devin: failed to poll session %s: %s",
-                            session_id, e,
+                        await recorder.record(
+                            tool="devin",
+                            event_type="session_complete",
+                            detail=(
+                                f"[{idx + 1}/{len(file_groups)}] Session {session_id} "
+                                f"finished ({effective_status}) for {file_path}"
+                            ),
+                            alert_number=file_alerts[0].number,
+                            metadata={
+                                "session_id": session_id,
+                                "session_url": session_url,
+                                "status": effective_status,
+                                "file_path": file_path,
+                                "acus_consumed": acus,
+                            },
+                            cost_usd=cost,
                         )
 
-                # Wait before next poll cycle
-                if len(finished_sessions) < len(session_map):
-                    await asyncio.sleep(DEVIN_POLL_INTERVAL)
+                        # Update devin_sessions table
+                        prs = status_data.get("pull_requests", [])
+                        pr_url = prs[0].get("pr_url") if prs else None
+                        await db.execute(
+                            """UPDATE devin_sessions
+                               SET status = ?, pr_url = ?,
+                                   acus = COALESCE(?, acus),
+                                   updated_at = datetime('now')
+                               WHERE repo = ? AND session_id = ?""",
+                            (effective_status, pr_url, acus, resolved_repo, session_id),
+                        )
+                        await db.commit()
 
-            # ---- Phase 3: Detect new commits on the branch ----
-            completed = 0
-            failed = 0
+                        # Count as failed if it ended in error/suspended
+                        # (exit and waiting_for_user are considered success)
+                        if effective_status in ("error", "suspended"):
+                            failed += len(file_alerts)
 
+                except Exception as e:
+                    logger.warning(
+                        "Benchmark devin: failed to poll session %s: %s",
+                        session_id, e,
+                    )
+
+            # If cancelled, stop processing further file groups
+            if cancel_event and cancel_event.is_set():
+                break
+
+            # -- Step 3: Detect new commits from this session --
             try:
                 new_commits = await github.list_commits(
-                    branch_name, since_sha=initial_branch_sha,
+                    branch_name, since_sha=last_known_sha,
                 )
 
                 if new_commits:
-                    await recorder.record(
-                        tool="devin",
-                        event_type="commits_detected",
-                        detail=(
-                            f"Found {len(new_commits)} new commit(s) on {branch_name}"
-                        ),
-                        metadata={
-                            "commit_count": len(new_commits),
-                            "commits": [
-                                {"sha": c["sha"][:8], "message": c["message"][:120]}
-                                for c in new_commits
-                            ],
-                        },
-                    )
-
                     for commit in new_commits:
                         await recorder.record(
                             tool="devin",
                             event_type="patch_applied",
                             detail=f"Devin committed: {commit['message'][:120]}",
+                            alert_number=file_alerts[0].number,
                             metadata={
                                 "commit_sha": commit["sha"],
                                 "branch": branch_name,
                                 "commit_message": commit["message"],
                                 "author": commit["author"],
+                                "session_id": session_id,
                             },
                         )
-                    completed = len(new_commits)
+                    total_commits += len(new_commits)
+
+                    # Advance last_known_sha so the next session only sees
+                    # its own commits
+                    last_known_sha = new_commits[0]["sha"]
                 else:
                     logger.info(
-                        "Benchmark %d: no new commits on %s from Devin",
-                        run_id, branch_name,
+                        "Benchmark %d: no new commits from session %s",
+                        run_id, session_id,
                     )
 
             except Exception as e:
                 logger.exception(
-                    "Benchmark devin: failed to list commits on %s", branch_name,
+                    "Benchmark devin: failed to list commits after session %s",
+                    session_id,
                 )
                 await recorder.record(
                     tool="devin",
                     event_type="error",
-                    detail=f"Failed to check commits on {branch_name}: {str(e)[:200]}",
-                    metadata={"error": str(e)[:500]},
+                    detail=f"Failed to check commits after session {session_id}: {str(e)[:200]}",
+                    metadata={"error": str(e)[:500], "session_id": session_id},
                 )
-
-            # Count sessions that ended in error/suspended as failed
-            for session_id, status in finished_sessions.items():
-                if status != "exit":
-                    file_path, file_alerts = session_map[session_id]
-                    failed += len(file_alerts)
-
-            # Count unfinished sessions (timed out) as failed too
-            for session_id in session_map:
-                if session_id not in finished_sessions:
-                    file_path, file_alerts = session_map[session_id]
-                    failed += len(file_alerts)
 
         await recorder.record(
             tool="devin",
             event_type="remediation_complete",
             detail=(
                 f"Devin complete: {sessions_created} session(s), "
-                f"{completed} commit(s), {failed} failed "
+                f"{total_commits} commit(s), {failed} failed "
                 f"out of {len(alerts)} alerts"
             ),
             metadata={
                 "sessions_created": sessions_created,
-                "commits": completed,
+                "commits": total_commits,
                 "failed": failed,
                 "total_alerts": len(alerts),
                 "file_count": len(file_groups),
                 "branch": branch_name,
+                "sessions": all_sessions,
             },
         )
     except Exception:

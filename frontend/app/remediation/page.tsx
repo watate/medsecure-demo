@@ -324,6 +324,33 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
   // Running cost total
   const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
+  // Extract Devin session info from events (session_created / session_complete / analyzing)
+  const devinSessions = useMemo(() => {
+    const sessions: { id: string; url: string; filePath: string; status: string }[] = [];
+    const seen = new Set<string>();
+    for (const event of visibleEvents) {
+      if (event.tool !== "devin") continue;
+      const meta = event.metadata || {};
+      const sid = meta.session_id as string | undefined;
+      if (!sid || seen.has(sid)) {
+        // Update status if we see a session_complete event for a known session
+        if (sid && seen.has(sid) && event.event_type === "session_complete") {
+          const existing = sessions.find((s) => s.id === sid);
+          if (existing) existing.status = String(meta.status ?? "done");
+        }
+        continue;
+      }
+      seen.add(sid);
+      sessions.push({
+        id: sid,
+        url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
+        filePath: String(meta.file_path ?? ""),
+        status: event.event_type === "session_complete" ? String(meta.status ?? "done") : "running",
+      });
+    }
+    return sessions;
+  }, [visibleEvents]);
+
   // Determine tool completion status
   const toolStatus = (tool: string): "running" | "completed" | "error" | "waiting" | "cancelled" => {
     const toolEvents = eventsByTool[tool] || [];
@@ -491,6 +518,55 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
           </div>
         </CardContent>
       </Card>
+
+      {/* Devin Sessions */}
+      {devinSessions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Devin Sessions</CardTitle>
+            <CardDescription>
+              {devinSessions.length} session{devinSessions.length !== 1 ? "s" : ""} created
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {devinSessions.map((session) => (
+                <div
+                  key={session.id}
+                  className="flex items-center gap-3 py-2 px-3 rounded-md border text-sm"
+                >
+                  <span className="shrink-0">
+                    {session.status === "running" ? (
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                      </span>
+                    ) : session.status === "error" || session.status === "suspended" ? (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                    ) : (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                    )}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-mono text-xs truncate">{session.filePath}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {session.status === "running" ? "In progress..." : session.status}
+                    </p>
+                  </div>
+                  <a
+                    href={session.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline shrink-0"
+                  >
+                    View session
+                  </a>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Event Log */}
       <Card>
