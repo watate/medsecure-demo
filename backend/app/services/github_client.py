@@ -366,7 +366,7 @@ class GitHubClient:
             await asyncio.sleep(poll_interval)
             status = await self.get_autofix_status(alert_number)
             state = status.get("status", "")
-            if state in ("succeeded", "failed", "dismissed", "skipped"):
+            if state in ("succeeded", "success", "failed", "dismissed", "skipped"):
                 return status
         # Timed out — return last known status
         return await self.get_autofix_status(alert_number)

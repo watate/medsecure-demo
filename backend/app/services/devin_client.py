@@ -163,6 +163,26 @@ class DevinClient:
         )
         return response.json()
 
+    async def list_sessions(self) -> list[dict]:
+        """List all sessions for the organization.
+
+        GET /v3/organizations/{org_id}/sessions
+
+        Returns the ``items`` array from the response. Each item includes
+        ``session_id``, ``status``, ``status_detail``, ``acus_consumed``,
+        ``url``, ``pull_requests``, etc.
+
+        This endpoint reliably exposes ``status_detail`` (e.g.
+        ``"waiting_for_user"``), which the single-session endpoint may omit.
+        """
+        response = await self._request_with_retry(
+            "GET",
+            self._sessions_url,
+            headers=self.headers,
+        )
+        data = response.json()
+        return data.get("items", [])
+
     async def send_message(self, session_id: str, message: str) -> None:
         """Send a message to an existing Devin session."""
         await self._request_with_retry(
@@ -170,4 +190,60 @@ class DevinClient:
             f"{self._sessions_url}/{session_id}/messages",
             headers=self.headers,
             json={"message": message},
+        )
+
+    def build_followup_message(
+        self, alerts: list[Alert], repo: str, branch: str,
+    ) -> str:
+        """Build a follow-up message for the next batch of alerts.
+
+        Used in the single-session model: after Devin reaches
+        ``waiting_for_user``, we send it the next file group's alerts
+        as a message instead of creating a new session.
+        """
+        file_path = alerts[0].file_path
+        if len(alerts) == 1:
+            a = alerts[0]
+            return (
+                f"Great work! Now fix the next CodeQL finding on the same branch `{branch}`.\n\n"
+                f"**Alert #{a.number}**: {a.rule_id}\n"
+                f"**Description**: {a.rule_description}\n"
+                f"**Severity**: {a.severity}\n"
+                f"**File**: `{a.file_path}` (lines {a.start_line}-{a.end_line})\n"
+                f"**Message**: {a.message}\n\n"
+                f"Instructions:\n"
+                f"1. Make sure you're on the `{branch}` branch\n"
+                f"2. Read the affected file and understand the vulnerability\n"
+                f"3. Fix the security issue following best practices\n"
+                f"4. Make sure the fix doesn't break existing functionality\n"
+                f"5. Commit and push directly to the `{branch}` branch\n"
+                f"6. Do NOT create a PR — push directly to the branch\n\n"
+                f"The fix should address the root cause, not just suppress the warning."
+            )
+
+        alert_sections: list[str] = []
+        for a in alerts:
+            alert_sections.append(
+                f"- **Alert #{a.number}**: {a.rule_id}\n"
+                f"  Description: {a.rule_description}\n"
+                f"  Severity: {a.severity}\n"
+                f"  Lines: {a.start_line}-{a.end_line}\n"
+                f"  Message: {a.message}"
+            )
+        alerts_text = "\n\n".join(alert_sections)
+        alert_nums = ", ".join(f"#{a.number}" for a in alerts)
+        return (
+            f"Great work! Now fix {len(alerts)} more CodeQL findings on the same "
+            f"branch `{branch}`.\n\n"
+            f"All alerts are in the same file: `{file_path}`\n\n"
+            f"{alerts_text}\n\n"
+            f"Instructions:\n"
+            f"1. Make sure you're on the `{branch}` branch\n"
+            f"2. Read `{file_path}` and understand all {len(alerts)} "
+            f"vulnerabilities (alerts {alert_nums})\n"
+            f"3. Fix ALL security issues\n"
+            f"4. Make sure the fixes don't break existing functionality\n"
+            f"5. Commit and push directly to the `{branch}` branch\n"
+            f"6. Do NOT create a PR — push directly to the branch\n\n"
+            f"Address the root cause of each issue."
         )

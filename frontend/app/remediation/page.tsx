@@ -13,6 +13,7 @@ import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrored from replay page for consistency)
@@ -241,10 +242,16 @@ function MetadataBadges({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
-function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: number }) {
+function TimelineEvent({ event, maxOffset, isFirstRow }: { event: ReplayEvent; maxOffset: number; isFirstRow: boolean }) {
   const leftPct = maxOffset > 0 ? (event.timestamp_offset_ms / maxOffset) * 100 : 0;
   const icon = EVENT_ICONS[event.event_type] || "\u2022";
   const meta = event.metadata || {};
+
+  // For the first row, show tooltip below to avoid being clipped by the card boundary.
+  // For all other rows, show above as usual.
+  const tooltipPosition = isFirstRow
+    ? "absolute top-full left-1/2 -translate-x-1/2 mt-2 hidden group-hover:block z-10 w-80"
+    : "absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80";
 
   return (
     <div
@@ -253,7 +260,7 @@ function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: nu
     >
       <div className="relative cursor-pointer">
         <span className="text-sm">{icon}</span>
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80">
+        <div className={tooltipPosition}>
           <div className="rounded-lg border bg-popover p-3 text-xs shadow-md">
             <p className="font-medium">{event.event_type.replace(/_/g, " ")}</p>
             <p className="text-muted-foreground mt-1">{event.detail}</p>
@@ -280,7 +287,6 @@ function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: nu
 
 function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boolean }) {
   const maxOffset = run.total_duration_ms || Math.max(...run.events.map((e) => e.timestamp_offset_ms), 1);
-  const logEndRef = useRef<HTMLDivElement>(null);
 
   const visibleEvents = run.events;
 
@@ -319,6 +325,60 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
   // Running cost total
   const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
+  // Extract Devin file-group info from events.
+  // In the single-session model every file group shares the same session_id,
+  // so we key by session_id + file_path to get one entry per group.
+  const devinSessions = useMemo(() => {
+    const sessions: { id: string; url: string; filePath: string; status: string }[] = [];
+    const seen = new Set<string>();
+    for (const event of visibleEvents) {
+      if (event.tool !== "devin") continue;
+      const meta = event.metadata || {};
+      const sid = meta.session_id as string | undefined;
+      const fp = String(meta.file_path ?? "");
+      if (!sid) continue;
+      const key = `${sid}:${fp}`;
+
+      if (seen.has(key)) {
+        // Update status for an already-tracked file group
+        if (event.event_type === "session_complete" || event.event_type === "cancelled" || event.event_type === "polling_timeout") {
+          const existing = sessions.find((s) => s.id === sid && s.filePath === fp);
+          if (existing) {
+            if (event.event_type === "session_complete") {
+              existing.status = String(meta.status ?? "done");
+            } else if (event.event_type === "cancelled") {
+              existing.status = "cancelled";
+            } else if (event.event_type === "polling_timeout") {
+              existing.status = "timeout";
+            }
+          }
+        }
+        continue;
+      }
+
+      // Entry-creation events: session_created (idx=0), message_sent (idx>0), analyzing
+      if (event.event_type === "session_created" || event.event_type === "message_sent" || event.event_type === "analyzing") {
+        seen.add(key);
+        sessions.push({
+          id: sid,
+          url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
+          filePath: fp,
+          status: "running",
+        });
+      } else if (event.event_type === "session_complete") {
+        // May see session_complete without a prior creation event
+        seen.add(key);
+        sessions.push({
+          id: sid,
+          url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
+          filePath: fp,
+          status: String(meta.status ?? "done"),
+        });
+      }
+    }
+    return sessions;
+  }, [visibleEvents]);
+
   // Determine tool completion status
   const toolStatus = (tool: string): "running" | "completed" | "error" | "waiting" | "cancelled" => {
     const toolEvents = eventsByTool[tool] || [];
@@ -330,10 +390,13 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
     return "running";
   };
 
-  // Auto-scroll event log in live mode
+  const logContainerRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll only the event log container (not the whole page) in live mode
   useEffect(() => {
-    if (isLive && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (isLive && logContainerRef.current) {
+      const el = logContainerRef.current;
+      el.scrollTop = el.scrollHeight;
     }
   }, [isLive, visibleEvents.length]);
 
@@ -401,10 +464,10 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                         </span>
                       )}
                       {status === "completed" && (
-                        <span className="text-xs text-emerald-600">\u2713</span>
+                        <span className="text-xs text-emerald-600">{"\u2713"}</span>
                       )}
                       {status === "error" && (
-                        <span className="text-xs text-destructive">\u2717</span>
+                        <span className="text-xs text-destructive">{"\u2717"}</span>
                       )}
                       {status === "cancelled" && (
                         <span className="text-xs text-amber-600">{"\u23f9"}</span>
@@ -446,7 +509,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
         </CardHeader>
         <CardContent>
           <div className="space-y-6">
-            {run.tools.map((tool) => {
+            {run.tools.map((tool, toolIndex) => {
               const toolEvents = eventsByTool[tool] || [];
 
               return (
@@ -464,6 +527,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                         key={event.id}
                         event={event}
                         maxOffset={maxOffset}
+                        isFirstRow={toolIndex === 0}
                       />
                     ))}
                   </div>
@@ -483,6 +547,57 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
         </CardContent>
       </Card>
 
+      {/* Devin Sessions */}
+      {devinSessions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Devin Sessions</CardTitle>
+            <CardDescription>
+              {devinSessions.length} session{devinSessions.length !== 1 ? "s" : ""} created
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {devinSessions.map((session) => (
+                <div
+                  key={`${session.id}:${session.filePath}`}
+                  className="flex items-center gap-3 py-2 px-3 rounded-md border text-sm"
+                >
+                  <span className="shrink-0">
+                    {session.status === "running" ? (
+                      <span className="relative flex h-2.5 w-2.5">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                        <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                      </span>
+                    ) : session.status === "error" || session.status === "suspended" ? (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                    ) : session.status === "timeout" || session.status === "cancelled" ? (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
+                    ) : (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
+                    )}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-mono text-xs truncate">{session.filePath}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {session.status === "running" ? "In progress..." : session.status === "timeout" ? "Timed out" : session.status === "cancelled" ? "Cancelled" : session.status}
+                    </p>
+                  </div>
+                  <a
+                    href={session.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-xs text-blue-600 hover:underline shrink-0"
+                  >
+                    View session
+                  </a>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Event Log */}
       <Card>
         <CardHeader>
@@ -492,29 +607,41 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="max-h-96 overflow-y-auto space-y-1">
+          <div ref={logContainerRef} className="max-h-96 overflow-y-auto space-y-1">
             {visibleEvents.map((event) => {
               const meta = event.metadata || {};
+              const rawResponse = meta.raw_response as string | Record<string, unknown> | undefined;
               return (
-                <div
-                  key={event.id}
-                  className="flex items-start gap-3 py-1.5 text-sm"
-                >
-                  <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
-                    +{formatDuration(event.timestamp_offset_ms)}
-                  </span>
-                  <span className={`font-medium w-20 shrink-0 text-xs ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
-                    {TOOL_LABELS[event.tool] || event.tool}
-                  </span>
-                  <span className="w-4">{EVENT_ICONS[event.event_type] || "\u2022"}</span>
-                  <div className="flex-1 min-w-0">
-                    <span className="text-muted-foreground">{event.detail}</span>
-                    <MetadataBadges metadata={meta} />
-                  </div>
-                  {event.cost_usd > 0 && (
-                    <span className="text-xs font-mono text-amber-600 shrink-0">
-                      ${event.cost_usd.toFixed(4)}
+                <div key={event.id} className="py-1.5 text-sm">
+                  <div className="flex items-start gap-3">
+                    <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
+                      +{formatDuration(event.timestamp_offset_ms)}
                     </span>
+                    <span className={`font-medium w-20 shrink-0 text-xs ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
+                      {TOOL_LABELS[event.tool] || event.tool}
+                    </span>
+                    <span className="w-4">{EVENT_ICONS[event.event_type] || "\u2022"}</span>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-muted-foreground">{event.detail}</span>
+                      <MetadataBadges metadata={meta} />
+                    </div>
+                    {event.cost_usd > 0 && (
+                      <span className="text-xs font-mono text-amber-600 shrink-0">
+                        ${event.cost_usd.toFixed(4)}
+                      </span>
+                    )}
+                  </div>
+                  {rawResponse && (
+                    <details className="ml-[9.5rem] mt-1">
+                      <summary className="text-[10px] text-blue-600 cursor-pointer hover:underline select-none">
+                        View raw response
+                      </summary>
+                      <pre className="mt-1 p-2 rounded bg-muted text-[11px] overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+                        {typeof rawResponse === "string"
+                          ? rawResponse
+                          : JSON.stringify(rawResponse, null, 2)}
+                      </pre>
+                    </details>
                   )}
                 </div>
               );
@@ -524,7 +651,6 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                 Waiting for events...
               </p>
             )}
-            <div ref={logEndRef} />
           </div>
         </CardContent>
       </Card>
@@ -729,6 +855,9 @@ export default function RemediationPage() {
         </div>
         {setupCollapsed && (
           <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-sm font-mono">
+              {filteredAlertCount} alerts
+            </Badge>
             {benchmarkRunning && (
               <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
             )}
@@ -757,9 +886,6 @@ export default function RemediationPage() {
                 Stop Benchmark
               </Button>
             )}
-            <Button variant="outline" size="sm" onClick={() => setSetupCollapsed(false)}>
-              Show Setup
-            </Button>
             {!benchmarkRunning && (
               <Button variant="outline" size="sm" onClick={resetBenchmark}>
                 New Benchmark
@@ -918,11 +1044,75 @@ export default function RemediationPage() {
         <LiveReplayView run={liveRun} isLive={benchmarkRunning} />
       )}
 
-      {/* Loading state before first poll returns */}
-      {runId != null && !liveRun && (
-        <div className="flex flex-col items-center justify-center py-16 space-y-4">
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          <p className="text-muted-foreground">Starting benchmark...</p>
+      {/* Skeleton loading while benchmark initialises (branch creation, etc.) */}
+      {benchmarkRunning && !liveRun && (
+        <div className="space-y-6">
+          {/* Status bar skeleton */}
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Skeleton className="h-3 w-3 rounded-full" />
+                  <Skeleton className="h-4 w-48" />
+                </div>
+                <Skeleton className="h-4 w-24" />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Remediation Timeline skeleton */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-5 w-44" />
+              </div>
+              <Skeleton className="h-3 w-64 mt-1" />
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="flex items-center gap-3">
+                    <Skeleton className="h-4 w-20" />
+                    <div className="flex-1 flex items-center gap-1">
+                      {Array.from({ length: 8 }).map((_, j) => (
+                        <Skeleton key={j} className="h-5 w-5 rounded" />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <Skeleton className="h-3 w-full mt-4" />
+            </CardContent>
+          </Card>
+
+          {/* Event Log skeleton */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-5 w-24" />
+              </div>
+              <Skeleton className="h-3 w-40 mt-1" />
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="flex items-start gap-3">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-5 w-5 rounded" />
+                    <div className="flex-1 space-y-1">
+                      <Skeleton className="h-3 w-full" />
+                      <Skeleton className="h-3 w-3/4" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Subtle status text */}
+          <p className="text-center text-sm text-muted-foreground animate-pulse">
+            Setting up benchmark &mdash; creating branches and preparing tools&hellip;
+          </p>
         </div>
       )}
     </div>
