@@ -232,8 +232,11 @@ async def seed_demo_data(
         total_demo_cost = 42.00 + 1.12 + 4.19 + 2.26 + 2.02  # $51.59
 
         cursor = await db.execute(
-            "INSERT INTO replay_runs (repo, scan_id, started_at, ended_at, status, tools, total_cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (resolved_repo, None, now, now, "completed", json.dumps(tools), round(total_demo_cost, 4)),
+            "INSERT INTO replay_runs"
+            " (repo, scan_id, started_at, ended_at, status, tools, total_cost_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (resolved_repo, None, now, now, "completed",
+             json.dumps(tools), round(total_demo_cost, 4)),
         )
         run_id = cursor.lastrowid
         assert run_id is not None
@@ -266,7 +269,8 @@ async def seed_demo_data(
             ("devin", "batch_complete", "Batch 2 complete: 15 alerts fixed in 5 minutes", None, 300000, 12.0),
             ("devin", "batch_complete", "Batch 3 complete: 12 alerts fixed in 8 minutes", None, 480000, 10.0),
             ("devin", "batch_complete", "Batch 4 complete: 7 alerts fixed in 12 minutes", None, 720000, 12.0),
-            ("devin", "remediation_complete", "42/47 alerts fixed (89.4%). 5 require manual review.", None, 780000, 0.0),
+            ("devin", "remediation_complete",
+             "42/47 alerts fixed (89.4%). 5 require manual review.", None, 780000, 0.0),
 
             # === Copilot Autofix ($0.04 per request) ===
             ("copilot", "suggestion_created", "Autofix suggestion for SQL Injection", 12, 30000, 0.04),
@@ -328,7 +332,8 @@ async def seed_demo_data(
             ("gemini", "codeql_verified", "Alert #12 resolved", 12, 58000, 0.0),
 
             ("gemini", "api_call_sent", "Sending alert context for XSS to gemini-3.1-pro-preview", 15, 12000, 0.0),
-            ("gemini", "patch_generated", "gemini-3.1-pro-preview generated fix for XSS vulnerability", 15, 22000, 0.063),
+            ("gemini", "patch_generated",
+             "gemini-3.1-pro-preview generated fix for XSS vulnerability", 15, 22000, 0.063),
             ("gemini", "patch_applied", "Patch applied", 15, 26000, 0.0),
             ("gemini", "codeql_verified", "Alert #15 resolved", 15, 70000, 0.0),
 

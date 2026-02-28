@@ -17,13 +17,13 @@ from app.models.schemas import (
 )
 from app.services.database import get_db
 from app.services.github_client import GitHubClient
+from app.services.replay_recorder import COPILOT_COST_PER_REQUEST, DEVIN_COST_PER_ACU
 from app.services.repo_resolver import (
     get_latest_tool_branches,
     resolve_baseline_branch,
     resolve_repo,
 )
 from app.services.report_generator import _estimate_api_cost
-from app.services.replay_recorder import COPILOT_COST_PER_REQUEST, DEVIN_COST_PER_ACU
 from app.services.token_counter import (
     build_grouped_prompt_for_file,
     count_tokens,
@@ -268,7 +268,9 @@ async def trigger_scan(
         )
         if estimated_tokens > 0 or unique_file_count > 0:
             await db.execute(
-                "UPDATE scan_branches SET estimated_prompt_tokens = ?, unique_file_count = ? WHERE scan_id = ? AND tool = 'baseline'",
+                "UPDATE scan_branches"
+                " SET estimated_prompt_tokens = ?, unique_file_count = ?"
+                " WHERE scan_id = ? AND tool = 'baseline'",
                 (estimated_tokens, unique_file_count, scan_id),
             )
 
@@ -429,7 +431,7 @@ async def compare_latest(
                 f"Assumes ~0.09 ACU per session, {session_count} sessions "
                 f"({baseline.open} alerts grouped into {session_count} files)"
             ) if baseline.unique_file_count > 0 else (
-                f"Assumes ~0.09 ACU per session (1 session per unique file)"
+                "Assumes ~0.09 ACU per session (1 session per unique file)"
             )
             cost_estimates[tool_name] = CostEstimate(
                 model="Devin (ACU-based)",
