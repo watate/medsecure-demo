@@ -325,7 +325,9 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
   // Running cost total
   const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
-  // Extract Devin session info from events (session_created / session_complete / analyzing)
+  // Extract Devin file-group info from events.
+  // In the single-session model every file group shares the same session_id,
+  // so we key by session_id + file_path to get one entry per group.
   const devinSessions = useMemo(() => {
     const sessions: { id: string; url: string; filePath: string; status: string }[] = [];
     const seen = new Set<string>();
@@ -333,10 +335,14 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
       if (event.tool !== "devin") continue;
       const meta = event.metadata || {};
       const sid = meta.session_id as string | undefined;
-      if (!sid || seen.has(sid)) {
-        // Update status if we see a terminal event for a known session
-        if (sid && seen.has(sid) && (event.event_type === "session_complete" || event.event_type === "cancelled" || event.event_type === "polling_timeout")) {
-          const existing = sessions.find((s) => s.id === sid);
+      const fp = String(meta.file_path ?? "");
+      if (!sid) continue;
+      const key = `${sid}:${fp}`;
+
+      if (seen.has(key)) {
+        // Update status for an already-tracked file group
+        if (event.event_type === "session_complete" || event.event_type === "cancelled" || event.event_type === "polling_timeout") {
+          const existing = sessions.find((s) => s.id === sid && s.filePath === fp);
           if (existing) {
             if (event.event_type === "session_complete") {
               existing.status = String(meta.status ?? "done");
@@ -349,13 +355,26 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
         }
         continue;
       }
-      seen.add(sid);
-      sessions.push({
-        id: sid,
-        url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
-        filePath: String(meta.file_path ?? ""),
-        status: event.event_type === "session_complete" ? String(meta.status ?? "done") : "running",
-      });
+
+      // Entry-creation events: session_created (idx=0), message_sent (idx>0), analyzing
+      if (event.event_type === "session_created" || event.event_type === "message_sent" || event.event_type === "analyzing") {
+        seen.add(key);
+        sessions.push({
+          id: sid,
+          url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
+          filePath: fp,
+          status: "running",
+        });
+      } else if (event.event_type === "session_complete") {
+        // May see session_complete without a prior creation event
+        seen.add(key);
+        sessions.push({
+          id: sid,
+          url: (meta.session_url as string) || `https://app.devin.ai/sessions/${sid}`,
+          filePath: fp,
+          status: String(meta.status ?? "done"),
+        });
+      }
     }
     return sessions;
   }, [visibleEvents]);

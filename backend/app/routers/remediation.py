@@ -1515,6 +1515,15 @@ async def _benchmark_devin(
                 break
 
             # -- Step 1: Create session (first group) or send message (subsequent) --
+            # Guard: if session creation failed at idx=0, can't send messages
+            if idx > 0 and not session_id:
+                logger.warning(
+                    "Benchmark %d: no session_id — skipping remaining %d group(s)",
+                    run_id, len(file_group_items) - idx,
+                )
+                failed += sum(len(fa) for _, fa in file_group_items[idx:])
+                break
+
             try:
                 if idx == 0:
                     # Create the single session with the first file group
@@ -1787,18 +1796,23 @@ async def _benchmark_devin(
                 )
 
                 if new_commits:
-                    for commit in new_commits:
+                    # Record one patch_applied per alert in this group
+                    # (so 3 alerts = 3 fixes, not 1)
+                    for alert in file_alerts:
                         await recorder.record(
                             tool="devin",
                             event_type="patch_applied",
-                            detail=f"Devin committed: {commit['message'][:120]}",
-                            alert_number=file_alerts[0].number,
+                            detail=(
+                                f"Devin fix for alert #{alert.number} "
+                                f"({alert.rule_id}) in {file_path}"
+                            ),
+                            alert_number=alert.number,
                             metadata={
-                                "commit_sha": commit["sha"],
+                                "commit_sha": new_commits[0]["sha"],
                                 "branch": branch_name,
-                                "commit_message": commit["message"],
-                                "author": commit["author"],
+                                "commit_count": len(new_commits),
                                 "session_id": session_id,
+                                "file_path": file_path,
                             },
                         )
                     total_commits += len(new_commits)
