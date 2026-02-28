@@ -2,7 +2,7 @@
 
 Provides a context-manager-style recorder that creates a replay run,
 tracks wall-clock time offsets, and records events with rich metadata
-as remediation proceeds.
+as remediation proceeds.  Also tracks running cost per event.
 """
 
 import json
@@ -13,6 +13,44 @@ from datetime import datetime, timezone
 from app.services.database import get_db
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Cost constants
+# ---------------------------------------------------------------------------
+
+# Devin: $2.00 per ACU
+DEVIN_COST_PER_ACU = 2.0
+
+# Copilot Autofix: $0.04 per request (flat rate)
+COPILOT_COST_PER_REQUEST = 0.04
+
+# API tool cost per million tokens (USD)
+API_TOOL_PRICING: dict[str, dict[str, float]] = {
+    "anthropic": {"input_per_mtok": 5.0, "output_per_mtok": 25.0},
+    "openai": {"input_per_mtok": 1.75, "output_per_mtok": 14.0},
+    "gemini": {"input_per_mtok": 2.0, "output_per_mtok": 12.0},
+}
+
+
+def compute_llm_call_cost(
+    tool: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+) -> float:
+    """Compute cost of a single LLM API call from token counts."""
+    pricing = API_TOOL_PRICING.get(tool)
+    if not pricing or not input_tokens:
+        return 0.0
+    inp = (input_tokens / 1_000_000) * pricing["input_per_mtok"]
+    out = ((output_tokens or 0) / 1_000_000) * pricing["output_per_mtok"]
+    return round(inp + out, 6)
+
+
+def compute_devin_session_cost(acus: float | None) -> float:
+    """Compute cost of a Devin session from ACU count."""
+    if not acus or acus <= 0:
+        return 0.0
+    return round(acus * DEVIN_COST_PER_ACU, 4)
 
 
 class ReplayRecorder:
@@ -47,19 +85,21 @@ class ReplayRecorder:
         self.repo = repo or ""
         self.run_id: int | None = None
         self._start_time: float = 0.0
+        self._cumulative_cost: float = 0.0
 
     async def start(self) -> int:
         """Create a replay run and start the clock. Returns the run_id."""
         now = datetime.now(timezone.utc).isoformat()
         self._start_time = time.monotonic()
+        self._cumulative_cost = 0.0
 
         db = await get_db()
         try:
             cursor = await db.execute(
                 "INSERT INTO replay_runs"
-                " (repo, scan_id, started_at, status, tools, branch_name)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (self.repo, self.scan_id, now, "running", json.dumps(self.tools), self.branch_name),
+                " (repo, scan_id, started_at, status, tools, branch_name, total_cost_usd)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (self.repo, self.scan_id, now, "running", json.dumps(self.tools), self.branch_name, 0.0),
             )
             self.run_id = cursor.lastrowid
             assert self.run_id is not None
@@ -82,29 +122,54 @@ class ReplayRecorder:
         detail: str,
         alert_number: int | None = None,
         metadata: dict[str, object] | None = None,
+        cost_usd: float = 0.0,
     ) -> int | None:
-        """Record a single event. Returns the event id, or None on failure."""
+        """Record a single event. Returns the event id, or None on failure.
+
+        If ``cost_usd`` is provided it is added to the cumulative total.
+        """
         if self.run_id is None:
             logger.warning("ReplayRecorder.record() called before start(), skipping")
             return None
 
+        self._cumulative_cost += cost_usd
+
         now = datetime.now(timezone.utc).isoformat()
         offset_ms = self._offset_ms()
-        meta_json = json.dumps(metadata or {}, default=str)
+
+        # Inject cost fields into metadata for downstream consumers
+        meta = dict(metadata or {})
+        if cost_usd > 0:
+            meta["event_cost_usd"] = round(cost_usd, 6)
+        meta["cumulative_cost_usd"] = round(self._cumulative_cost, 6)
+
+        meta_json = json.dumps(meta, default=str)
 
         db = await get_db()
         try:
             cursor = await db.execute(
                 """INSERT INTO replay_events
-                   (run_id, tool, event_type, detail, alert_number, timestamp_offset_ms, metadata, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (self.run_id, tool, event_type, detail, alert_number, offset_ms, meta_json, now),
+                   (run_id, tool, event_type, detail, alert_number,
+                    timestamp_offset_ms, metadata, cost_usd, cumulative_cost_usd, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    self.run_id, tool, event_type, detail, alert_number,
+                    offset_ms, meta_json, round(cost_usd, 6),
+                    round(self._cumulative_cost, 6), now,
+                ),
             )
             event_id = cursor.lastrowid
+
+            # Update the run's total cost
+            await db.execute(
+                "UPDATE replay_runs SET total_cost_usd = ? WHERE id = ?",
+                (round(self._cumulative_cost, 6), self.run_id),
+            )
+
             await db.commit()
             logger.debug(
-                "Recorded replay event run=%d tool=%s type=%s alert=%s offset=%dms",
-                self.run_id, tool, event_type, alert_number, offset_ms,
+                "Recorded replay event run=%d tool=%s type=%s alert=%s offset=%dms cost=$%.6f cumulative=$%.6f",
+                self.run_id, tool, event_type, alert_number, offset_ms, cost_usd, self._cumulative_cost,
             )
             return event_id
         except Exception:
@@ -122,10 +187,13 @@ class ReplayRecorder:
         db = await get_db()
         try:
             await db.execute(
-                "UPDATE replay_runs SET status = ?, ended_at = ? WHERE id = ?",
-                (status, now, self.run_id),
+                "UPDATE replay_runs SET status = ?, ended_at = ?, total_cost_usd = ? WHERE id = ?",
+                (status, now, round(self._cumulative_cost, 6), self.run_id),
             )
             await db.commit()
-            logger.info("Finished replay recording run_id=%d status=%s", self.run_id, status)
+            logger.info(
+                "Finished replay recording run_id=%d status=%s total_cost=$%.4f",
+                self.run_id, status, self._cumulative_cost,
+            )
         finally:
             await db.close()

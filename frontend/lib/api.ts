@@ -30,12 +30,20 @@ export interface ScanListItem {
 
 export interface CostEstimate {
   model: string;
+  pricing_type: string; // "token", "per_request", "acu"
   estimated_input_tokens: number;
   estimated_output_tokens: number;
   input_cost_usd: number;
   output_cost_usd: number;
   total_cost_usd: number;
   pricing: Record<string, number>;
+  // Per-request pricing (Copilot)
+  alerts_processed: number;
+  cost_per_request_usd: number;
+  // ACU pricing (Devin)
+  estimated_acus: number;
+  cost_per_acu_usd: number;
+  assumption: string | null;
 }
 
 export interface ComparisonResult {
@@ -79,6 +87,7 @@ export interface DevinSession {
   file_path: string;
   status: string;
   pr_url: string | null;
+  acus: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -157,6 +166,8 @@ export interface ReplayEvent {
   alert_number: number | null;
   timestamp_offset_ms: number;
   metadata: Record<string, unknown>;
+  cost_usd: number;
+  cumulative_cost_usd: number;
   created_at: string;
 }
 
@@ -169,6 +180,7 @@ export interface ReplayRun {
   status: string;
   tools: string[];
   branch_name: string | null;
+  total_cost_usd: number;
 }
 
 export interface ReplayRunWithEvents extends ReplayRun {

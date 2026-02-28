@@ -33,22 +33,41 @@ _OPENAI_OUTPUT_COST_PER_MTOK = 14.0
 _GEMINI_INPUT_COST_PER_MTOK = 2.0
 _GEMINI_OUTPUT_COST_PER_MTOK = 12.0
 
+# Devin: $2.00 per ACU
+_DEVIN_COST_PER_ACU = 2.0
+
+# Copilot Autofix: $0.04 per request (flat rate per alert)
+_COPILOT_COST_PER_REQUEST = 0.04
+
 # Rough estimate: ~4500 input tokens per alert
 # Breakdown: ~3000-4000 tokens for full source file + ~500 for alert context
 # (CWE description, rule ID, affected lines) + ~200 for prompt instructions
 _ESTIMATED_INPUT_TOKENS_PER_ALERT = 4500
 
 
-def _estimate_api_cost(tool_name: str, alerts_processed: int, estimated_input_tokens: int | None = None) -> dict | None:
-    """Estimate the API cost for a tool.
+def _estimate_tool_cost(
+    tool_name: str,
+    alerts_processed: int,
+    estimated_input_tokens: int | None = None,
+    devin_acus: float | None = None,
+) -> dict | None:
+    """Estimate the cost for any tool.
 
-    If `estimated_input_tokens` is provided, we use that as the dynamic token
-    estimate (built from the actual baseline alert context + source files).
-
-    Otherwise, we fall back to a rough per-alert estimate.
-
-    Output tokens are assumed equal to input tokens as an approximation.
+    For API-based tools (anthropic, openai, gemini): token-based pricing.
+    For copilot: flat $0.04 per request/alert.
+    For devin: $2.00 per ACU.
     """
+    if tool_name in ("anthropic", "openai", "gemini"):
+        return _estimate_api_cost(tool_name, alerts_processed, estimated_input_tokens)
+    elif tool_name == "copilot":
+        return _estimate_copilot_cost(alerts_processed)
+    elif tool_name == "devin":
+        return _estimate_devin_cost(alerts_processed, devin_acus)
+    return None
+
+
+def _estimate_api_cost(tool_name: str, alerts_processed: int, estimated_input_tokens: int | None = None) -> dict | None:
+    """Estimate the API cost for a token-based tool."""
     if tool_name == "anthropic":
         input_cost_per_mtok = _ANTHROPIC_INPUT_COST_PER_MTOK
         output_cost_per_mtok = _ANTHROPIC_OUTPUT_COST_PER_MTOK
@@ -77,6 +96,7 @@ def _estimate_api_cost(tool_name: str, alerts_processed: int, estimated_input_to
 
     return {
         "model": model,
+        "pricing_type": "token",
         "estimated_input_tokens": input_tokens,
         "estimated_output_tokens": output_tokens,
         "input_cost_usd": round(input_cost, 4),
@@ -86,6 +106,37 @@ def _estimate_api_cost(tool_name: str, alerts_processed: int, estimated_input_to
             "input_per_mtok_usd": input_cost_per_mtok,
             "output_per_mtok_usd": output_cost_per_mtok,
         },
+    }
+
+
+def _estimate_copilot_cost(alerts_processed: int) -> dict:
+    """Estimate the cost for Copilot Autofix — flat $0.04 per request."""
+    total_cost = alerts_processed * _COPILOT_COST_PER_REQUEST
+    return {
+        "model": "Copilot Autofix",
+        "pricing_type": "per_request",
+        "alerts_processed": alerts_processed,
+        "cost_per_request_usd": _COPILOT_COST_PER_REQUEST,
+        "total_cost_usd": round(total_cost, 4),
+    }
+
+
+def _estimate_devin_cost(alerts_processed: int, acus: float | None = None) -> dict:
+    """Estimate the cost for Devin — $2.00 per ACU."""
+    if acus and acus > 0:
+        total_cost = acus * _DEVIN_COST_PER_ACU
+    else:
+        # Estimate: ~0.5 ACU per alert as a rough average
+        acus = alerts_processed * 0.5
+        total_cost = acus * _DEVIN_COST_PER_ACU
+
+    return {
+        "model": "Devin (ACU-based)",
+        "pricing_type": "acu",
+        "acus": round(acus, 2),
+        "cost_per_acu_usd": _DEVIN_COST_PER_ACU,
+        "alerts_processed": alerts_processed,
+        "total_cost_usd": round(total_cost, 4),
     }
 
 
@@ -157,8 +208,10 @@ def generate_ciso_report(
             perf["total_seconds"] = round(secs, 1)
             perf["avg_seconds_per_fix"] = round(avg_secs, 1)
 
-        # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens)
+        # Cost estimate for all tools
+        cost = _estimate_tool_cost(
+            tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens,
+        )
         if cost:
             perf["cost_estimate"] = cost
 
@@ -288,8 +341,10 @@ def generate_cto_report(
             entry["total_time"] = _format_duration(secs)
             entry["avg_time_per_fix"] = _format_duration(secs / total_fixed) if total_fixed > 0 else "N/A"
 
-        # Cost estimate for API-based tools
-        cost = _estimate_api_cost(tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens)
+        # Cost estimate for all tools
+        cost = _estimate_tool_cost(
+            tool_name, baseline_summary.open, baseline_summary.estimated_prompt_tokens,
+        )
         if cost:
             entry["cost_estimate"] = cost
 
@@ -306,10 +361,16 @@ def generate_cto_report(
         manual_hours = fixed * avg_manual_fix_minutes / 60
         manual_cost = round(manual_hours * avg_engineer_hourly_cost, 2)
 
+        tool_cost = comp.get("cost_estimate", {}).get("total_cost_usd", 0)
+        savings = round(manual_cost - tool_cost, 2)
+
         roi[tool_name] = {
             "alerts_fixed": fixed,
             "developer_hours_saved": round(manual_hours, 1),
             "manual_cost_usd": manual_cost,
+            "tool_cost_usd": round(tool_cost, 4),
+            "net_savings_usd": savings,
+            "roi_pct": round((savings / manual_cost * 100), 1) if manual_cost > 0 else 0.0,
         }
 
     # --- Backlog impact ---
@@ -342,6 +403,7 @@ def generate_cto_report(
             },
             "tools": roi,
         },
+        "price_comparison": _build_price_comparison(tool_comparison),
         "backlog_impact": backlog,
         "integration_workflow": {
             "description": "Automated remediation pipeline — zero engineer time required",
@@ -355,6 +417,38 @@ def generate_cto_report(
             ],
         },
         "recommendation": _generate_recommendation(tool_comparison, best_tool),
+    }
+
+
+def _build_price_comparison(tool_data: dict) -> dict:
+    """Build a side-by-side price comparison across all tools."""
+    comparison: dict[str, dict] = {}
+    for tool_name, data in tool_data.items():
+        cost_est = data.get("cost_estimate")
+        if not cost_est:
+            continue
+        fixed = data.get("total_fixed", 0)
+        total = cost_est.get("total_cost_usd", 0)
+        cost_per_fix = round(total / fixed, 4) if fixed > 0 else float('inf')
+        comparison[tool_name] = {
+            "display_name": TOOL_DISPLAY_NAMES.get(tool_name, tool_name),
+            "pricing_type": cost_est.get("pricing_type", "unknown"),
+            "model": cost_est.get("model", ""),
+            "total_cost_usd": total,
+            "alerts_fixed": fixed,
+            "cost_per_fix_usd": cost_per_fix,
+        }
+
+    # Rank by cost per fix (cheapest first)
+    ranked = sorted(comparison.items(), key=lambda x: x[1]["cost_per_fix_usd"])
+    cheapest = ranked[0][0] if ranked else None
+    most_expensive = ranked[-1][0] if ranked else None
+
+    return {
+        "tools": comparison,
+        "cheapest_tool": cheapest,
+        "most_expensive_tool": most_expensive,
+        "ranked_by_cost_per_fix": [t for t, _ in ranked],
     }
 
 

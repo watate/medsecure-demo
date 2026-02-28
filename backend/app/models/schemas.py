@@ -59,6 +59,7 @@ class BranchSummary(BaseModel):
     low: int
     other: int
     estimated_prompt_tokens: int = 0
+    unique_file_count: int = 0
 
 
 class ScanSnapshot(BaseModel):
@@ -77,12 +78,20 @@ class ScanListItem(BaseModel):
 
 class CostEstimate(BaseModel):
     model: str
-    estimated_input_tokens: int
-    estimated_output_tokens: int
-    input_cost_usd: float
-    output_cost_usd: float
-    total_cost_usd: float
-    pricing: dict[str, float]
+    pricing_type: str = "token"  # "token", "per_request", "acu"
+    estimated_input_tokens: int = 0
+    estimated_output_tokens: int = 0
+    input_cost_usd: float = 0.0
+    output_cost_usd: float = 0.0
+    total_cost_usd: float = 0.0
+    pricing: dict[str, float] = {}
+    # Per-request pricing (Copilot)
+    alerts_processed: int = 0
+    cost_per_request_usd: float = 0.0
+    # ACU pricing (Devin)
+    estimated_acus: float = 0.0
+    cost_per_acu_usd: float = 0.0
+    assumption: str | None = None  # Human-readable pricing assumption
 
 
 class ComparisonResult(BaseModel):
@@ -108,6 +117,7 @@ class DevinSession(BaseModel):
     file_path: str
     status: str
     pr_url: str | None = None
+    acus: float | None = None
     created_at: str
     updated_at: str
 
@@ -270,6 +280,8 @@ class ReplayEvent(BaseModel):
     alert_number: int | None = None
     timestamp_offset_ms: int
     metadata: dict[str, object] = {}
+    cost_usd: float = 0.0
+    cumulative_cost_usd: float = 0.0
     created_at: str
 
 
@@ -282,6 +294,7 @@ class ReplayRun(BaseModel):
     status: str
     tools: list[str]
     branch_name: str | None = None
+    total_cost_usd: float = 0.0
 
 
 class ReplayRunWithEvents(ReplayRun):

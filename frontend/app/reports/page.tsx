@@ -264,6 +264,7 @@ function CTOReport({ data }: { data: ReportData }) {
   const backlog = data.backlog_impact || {};
   const workflow = data.integration_workflow || {};
   const recommendation = data.recommendation || {};
+  const priceComparison = data.price_comparison || {};
 
   return (
     <div className="space-y-6">
@@ -386,6 +387,24 @@ function CTOReport({ data }: { data: ReportData }) {
                       <span className="text-muted-foreground">Alerts Fixed</span>
                       <span className="font-semibold">{r.alerts_fixed}</span>
                     </div>
+                    {r.tool_cost_usd > 0 && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">Tool Cost</span>
+                        <span className="font-semibold text-amber-600">${r.tool_cost_usd?.toFixed(4)}</span>
+                      </div>
+                    )}
+                    {r.net_savings_usd > 0 && (
+                      <div className="flex justify-between text-sm border-t pt-1">
+                        <span className="font-medium">Net Savings</span>
+                        <span className="font-bold text-emerald-600">${r.net_savings_usd?.toLocaleString()}</span>
+                      </div>
+                    )}
+                    {r.roi_pct > 0 && (
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">ROI</span>
+                        <span className="font-semibold text-emerald-600">{r.roi_pct}%</span>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -393,6 +412,61 @@ function CTOReport({ data }: { data: ReportData }) {
           </div>
         </CardContent>
       </Card>
+
+      {/* Price Comparison */}
+      {priceComparison.tools && Object.keys(priceComparison.tools).length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Price Comparison</CardTitle>
+            <CardDescription>
+              Side-by-side cost comparison across all remediation tools
+              {priceComparison.cheapest_tool && (
+                <> &middot; Cheapest: <span className="font-semibold text-emerald-600">{TOOL_LABELS[priceComparison.cheapest_tool] || priceComparison.cheapest_tool}</span></>
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b text-left">
+                    <th className="pb-2 font-medium">Tool</th>
+                    <th className="pb-2 font-medium text-right">Pricing Type</th>
+                    <th className="pb-2 font-medium text-right">Alerts Fixed</th>
+                    <th className="pb-2 font-medium text-right">Total Cost</th>
+                    <th className="pb-2 font-medium text-right">Cost / Fix</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {(priceComparison.ranked_by_cost_per_fix || []).map((toolKey: string, idx: number) => {
+                    const t = priceComparison.tools[toolKey] as Record<string, string | number>;
+                    if (!t) return null;
+                    const isCheapest = idx === 0;
+                    return (
+                      <tr key={toolKey} className={isCheapest ? "bg-emerald-50 dark:bg-emerald-950/20" : ""}>
+                        <td className="py-2 font-medium">
+                          {t.display_name as string}
+                          {isCheapest && <span className="ml-2 text-xs text-emerald-600 font-semibold">BEST VALUE</span>}
+                        </td>
+                        <td className="py-2 text-right text-muted-foreground capitalize">
+                          {(t.pricing_type as string)?.replace(/_/g, " ")}
+                        </td>
+                        <td className="py-2 text-right font-semibold">{t.alerts_fixed as number}</td>
+                        <td className="py-2 text-right font-mono font-semibold">
+                          ${(t.total_cost_usd as number)?.toFixed(4)}
+                        </td>
+                        <td className="py-2 text-right font-mono font-bold">
+                          ${(t.cost_per_fix_usd as number)?.toFixed(4)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Security Backlog Impact */}
       <Card>
