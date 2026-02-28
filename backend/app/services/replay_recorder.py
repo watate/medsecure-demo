@@ -178,10 +178,10 @@ class ReplayRecorder:
             )
             event_id = cursor.lastrowid
 
-            # Update the run's total cost
+            # Update the run's total cost atomically (safe for concurrent recorders)
             await db.execute(
-                "UPDATE replay_runs SET total_cost_usd = ? WHERE id = ?",
-                (round(self._cumulative_cost, 6), self.run_id),
+                "UPDATE replay_runs SET total_cost_usd = total_cost_usd + ? WHERE id = ?",
+                (round(cost_usd, 6), self.run_id),
             )
 
             await db.commit()
@@ -205,8 +205,8 @@ class ReplayRecorder:
         db = await get_db()
         try:
             await db.execute(
-                "UPDATE replay_runs SET status = ?, ended_at = ?, total_cost_usd = ? WHERE id = ?",
-                (status, now, round(self._cumulative_cost, 6), self.run_id),
+                "UPDATE replay_runs SET status = ?, ended_at = ? WHERE id = ?",
+                (status, now, self.run_id),
             )
             await db.commit()
             logger.info(
