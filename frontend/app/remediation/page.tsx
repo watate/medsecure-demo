@@ -445,10 +445,10 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                         </span>
                       )}
                       {status === "completed" && (
-                        <span className="text-xs text-emerald-600">\u2713</span>
+                        <span className="text-xs text-emerald-600">{"\u2713"}</span>
                       )}
                       {status === "error" && (
-                        <span className="text-xs text-destructive">\u2717</span>
+                        <span className="text-xs text-destructive">{"\u2717"}</span>
                       )}
                       {status === "cancelled" && (
                         <span className="text-xs text-amber-600">{"\u23f9"}</span>
