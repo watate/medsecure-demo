@@ -9,6 +9,9 @@ from app.models.schemas import (
     ApiRemediationJob,
     ApiRemediationRequest,
     ApiRemediationResponse,
+    CopilotAutofixJob,
+    CopilotAutofixRequest,
+    CopilotAutofixResponse,
     DevinSession,
     RemediationRequest,
     RemediationResponse,
@@ -719,5 +722,306 @@ async def refresh_devin_sessions() -> dict:
 
         await db.commit()
         return {"updated": updated_count, "total_running": len(rows)}
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Copilot Autofix remediation
+# ---------------------------------------------------------------------------
+
+COPILOT_INTER_ALERT_DELAY = 2.0  # seconds between trigger calls
+
+
+@router.post("/copilot", response_model=CopilotAutofixResponse)
+async def trigger_copilot_remediation(
+    request: CopilotAutofixRequest,
+) -> CopilotAutofixResponse:
+    """Trigger remediation using GitHub Copilot Autofix.
+
+    For each requested alert:
+    1. Trigger Copilot Autofix generation via the REST API
+    2. Poll until the autofix succeeds, fails, or times out
+    3. If succeeded, commit the fix to a fresh branch
+    4. Record every step as a replay event
+    """
+    import asyncio
+    import time as _time
+
+    github = GitHubClient()
+
+    # Fetch open alerts from baseline branch
+    alerts = await github.get_alerts(settings.branch_baseline, state="open")
+    requested_set = set(request.alert_numbers)
+    alerts = [a for a in alerts if a.number in requested_set]
+
+    if not alerts:
+        return CopilotAutofixResponse(
+            total_alerts=0,
+            completed=0,
+            failed=0,
+            skipped=0,
+            jobs=[],
+            message="No matching open alerts found",
+        )
+
+    # Create a fresh branch from main
+    branch_name = f"remediate/copilot-{int(_time.time())}"
+    try:
+        await github.create_branch(
+            branch_name, from_branch=settings.branch_baseline,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create branch {branch_name}: {e}",
+        ) from e
+
+    # Start replay recording
+    recorder = ReplayRecorder(tools=["copilot"], branch_name=branch_name)
+    await recorder.start()
+    await recorder.record(
+        tool="copilot",
+        event_type="scan_started",
+        detail=(
+            f"Starting Copilot Autofix for {len(alerts)} alert(s) "
+            f"on {branch_name}"
+        ),
+        metadata={
+            "branch": branch_name,
+            "source_branch": settings.branch_baseline,
+            "alert_count": len(alerts),
+            "alert_numbers": [a.number for a in alerts],
+        },
+    )
+
+    db = await get_db()
+    jobs: list[CopilotAutofixJob] = []
+    completed = 0
+    failed = 0
+    skipped = 0
+    recorder_finished = False
+
+    try:
+        for idx, alert in enumerate(alerts):
+            # Rate-limit: wait between triggers (skip for the first one)
+            if idx > 0:
+                await asyncio.sleep(COPILOT_INTER_ALERT_DELAY)
+
+            # Check if already processed
+            cursor = await db.execute(
+                "SELECT * FROM copilot_autofix_jobs WHERE alert_number = ? AND status = 'completed'",
+                (alert.number,),
+            )
+            existing = await cursor.fetchone()
+            if existing:
+                logger.info(
+                    "Skipping alert #%d — already remediated by Copilot",
+                    alert.number,
+                )
+                await recorder.record(
+                    tool="copilot",
+                    event_type="alert_skipped",
+                    detail=f"Alert #{alert.number} already remediated by Copilot",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                        "reason": "already_completed",
+                    },
+                )
+                skipped += 1
+                continue
+
+            # Insert a pending job row
+            cursor = await db.execute(
+                """INSERT INTO copilot_autofix_jobs
+                   (alert_number, rule_id, file_path, status)
+                   VALUES (?, ?, ?, 'running')""",
+                (alert.number, alert.rule_id, alert.file_path),
+            )
+            job_id = cursor.lastrowid or 0
+            await db.commit()
+
+            try:
+                # 1. Trigger autofix + poll
+                await recorder.record(
+                    tool="copilot",
+                    event_type="autofix_triggered",
+                    detail=f"Triggering Copilot Autofix for alert #{alert.number} ({alert.rule_id})",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                        "severity": alert.severity,
+                    },
+                )
+
+                autofix = await github.poll_autofix(alert.number)
+                autofix_status = autofix.get("status", "unknown")
+                description = autofix.get("description", "")
+
+                await recorder.record(
+                    tool="copilot",
+                    event_type="autofix_result",
+                    detail=f"Autofix for alert #{alert.number}: {autofix_status}",
+                    alert_number=alert.number,
+                    metadata={
+                        "autofix_status": autofix_status,
+                        "description": description,
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                    },
+                )
+
+                if autofix_status != "succeeded":
+                    # Autofix didn't succeed — mark as failed
+                    await db.execute(
+                        """UPDATE copilot_autofix_jobs
+                           SET status = 'failed',
+                               autofix_status = ?,
+                               error_message = ?,
+                               updated_at = datetime('now')
+                           WHERE id = ?""",
+                        (autofix_status, f"Autofix status: {autofix_status}", job_id),
+                    )
+                    await db.commit()
+                    failed += 1
+                    continue
+
+                # 2. Commit the fix to our branch
+                commit_msg = (
+                    f"fix: Copilot Autofix for alert #{alert.number} "
+                    f"({alert.rule_id}) in {alert.file_path}"
+                )
+                commit_result = await github.commit_autofix(
+                    alert.number, branch_name, commit_msg,
+                )
+                commit_sha = commit_result.get("sha", "")
+
+                await recorder.record(
+                    tool="copilot",
+                    event_type="patch_applied",
+                    detail=f"Copilot fix committed for alert #{alert.number}",
+                    alert_number=alert.number,
+                    metadata={
+                        "commit_sha": commit_sha,
+                        "branch": branch_name,
+                        "file_path": alert.file_path,
+                        "description": description,
+                    },
+                )
+
+                # 3. Update job status
+                await db.execute(
+                    """UPDATE copilot_autofix_jobs
+                       SET status = 'completed',
+                           autofix_status = ?,
+                           commit_sha = ?,
+                           description = ?,
+                           updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (autofix_status, commit_sha, description, job_id),
+                )
+                await db.commit()
+                completed += 1
+
+                logger.info(
+                    "Copilot Autofix committed for alert #%d (commit %s)",
+                    alert.number,
+                    commit_sha[:8] if commit_sha else "unknown",
+                )
+
+            except Exception as e:
+                error_msg = str(e)[:500]
+                logger.exception(
+                    "Failed Copilot Autofix for alert #%d", alert.number,
+                )
+                await db.execute(
+                    """UPDATE copilot_autofix_jobs
+                       SET status = 'failed',
+                           error_message = ?,
+                           updated_at = datetime('now')
+                       WHERE id = ?""",
+                    (error_msg, job_id),
+                )
+                await db.commit()
+                failed += 1
+
+                await recorder.record(
+                    tool="copilot",
+                    event_type="error",
+                    detail=f"Failed autofix for alert #{alert.number}: {error_msg[:200]}",
+                    alert_number=alert.number,
+                    metadata={
+                        "error": error_msg,
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                    },
+                )
+
+        # Record completion summary
+        await recorder.record(
+            tool="copilot",
+            event_type="remediation_complete",
+            detail=(
+                f"Copilot Autofix complete on {branch_name}: {completed} fixed, "
+                f"{failed} failed, {skipped} skipped out of {len(alerts)} alerts"
+            ),
+            metadata={
+                "total_alerts": len(alerts),
+                "completed": completed,
+                "failed": failed,
+                "skipped": skipped,
+                "branch": branch_name,
+            },
+        )
+        await recorder.finish()
+        recorder_finished = True
+
+        # Fetch all jobs for the response
+        placeholders = ",".join("?" * len(request.alert_numbers))
+        cursor = await db.execute(
+            f"""SELECT * FROM copilot_autofix_jobs
+                WHERE alert_number IN ({placeholders})
+                ORDER BY created_at DESC""",
+            tuple(request.alert_numbers),
+        )
+        rows = await cursor.fetchall()
+        jobs = [
+            CopilotAutofixJob(
+                id=row["id"],
+                alert_number=row["alert_number"],
+                rule_id=row["rule_id"],
+                file_path=row["file_path"],
+                status=row["status"],
+                autofix_status=row["autofix_status"],
+                commit_sha=row["commit_sha"],
+                description=row["description"],
+                error_message=row["error_message"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+        return CopilotAutofixResponse(
+            total_alerts=len(alerts),
+            completed=completed,
+            failed=failed,
+            skipped=skipped,
+            jobs=jobs,
+            message=(
+                f"Copilot Autofix complete on {branch_name}: "
+                f"{completed} fixed, {failed} failed, {skipped} skipped"
+            ),
+        )
+    except Exception:
+        if not recorder_finished:
+            try:
+                await recorder.finish("failed")
+            except Exception:
+                logger.exception("Failed to mark replay run as failed")
+        raise
     finally:
         await db.close()

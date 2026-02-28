@@ -1,7 +1,13 @@
+import asyncio
+import logging
+import time
+
 import httpx
 
 from app.config import settings
 from app.models.schemas import Alert, AlertWithCWE, BranchSummary
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubClient:
@@ -220,6 +226,88 @@ class GitHubClient:
                 headers=self.headers,
             )
             return response.status_code == 200
+
+    # ------------------------------------------------------------------
+    # Copilot Autofix helpers
+    # ------------------------------------------------------------------
+
+    async def trigger_autofix(self, alert_number: int) -> dict:
+        """Trigger Copilot Autofix generation for a code-scanning alert.
+
+        POST /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix
+        Returns 202 on success (generation started).
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_autofix_status(self, alert_number: int) -> dict:
+        """Get autofix status and fix details for an alert.
+
+        GET /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix
+        Returns status (e.g. "pending", "succeeded", "failed") plus
+        fix description and changes when succeeded.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def commit_autofix(
+        self, alert_number: int, target_ref: str, message: str,
+    ) -> dict:
+        """Commit a Copilot Autofix to a branch.
+
+        POST /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix/commits
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix/commits",
+                headers=self.headers,
+                json={
+                    "target_ref": f"refs/heads/{target_ref}",
+                    "message": message,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def poll_autofix(
+        self,
+        alert_number: int,
+        *,
+        poll_interval: float = 3.0,
+        max_wait: float = 120.0,
+    ) -> dict:
+        """Trigger autofix and poll until it completes or times out.
+
+        Returns the final autofix status dict.
+        """
+        await self.trigger_autofix(alert_number)
+        logger.info(
+            "Triggered Copilot Autofix for alert #%d, polling...",
+            alert_number,
+        )
+
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+            status = await self.get_autofix_status(alert_number)
+            state = status.get("status", "")
+            if state in ("succeeded", "failed", "dismissed", "skipped"):
+                return status
+        # Timed out — return last known status
+        return await self.get_autofix_status(alert_number)
 
     async def get_file_content(self, path: str, ref: str) -> str:
         """Get file content from a specific branch."""

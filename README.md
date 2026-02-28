@@ -9,7 +9,7 @@ Automated CodeQL remediation across AI tools (Devin, Anthropic, OpenAI, Google).
 3. **Group & Fix** — Groups alerts by file so multiple vulnerabilities in the same file are fixed in one pass (one LLM call, one commit per file). Avoids merge conflicts.
 4. **Replay** — Every step is recorded with rich metadata (model, tokens, latency, commit SHAs). The VP of Engineering can play back any run to stakeholders without re-running it.
 
-Supports: **Devin** (autonomous agent sessions), **Anthropic** (Claude), **OpenAI** (GPT), **Google** (Gemini).
+Supports: **Devin** (autonomous agent sessions), **Copilot Autofix** (GitHub-native), **Anthropic** (Claude), **OpenAI** (GPT), **Google** (Gemini).
 
 ## Architecture
 
@@ -39,7 +39,7 @@ on:
 Go to: [https://github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
 
 Fine-grained PAT with these permissions on the target repo:
-- **Code scanning alerts**: Read
+- **Code scanning alerts**: Read & Write
 - **Contents**: Read & Write
 - **Pull requests**: Read & Write
 
@@ -137,6 +137,7 @@ All endpoints except `/api/health` require authentication (better-auth session c
 | GET | `/api/alerts/live?tool=baseline` | Live alerts from GitHub API |
 | POST | `/api/remediate/devin` | Fix alerts via Devin (auto-branches, groups by file) |
 | POST | `/api/remediate/api-tool` | Fix alerts via LLM API (anthropic/openai/gemini) |
+| POST | `/api/remediate/copilot` | Fix alerts via Copilot Autofix (no LLM key needed) |
 | GET | `/api/remediate/devin/sessions` | List Devin sessions |
 | GET | `/api/remediate/api-tool/jobs` | List API remediation jobs |
 | POST | `/api/reports/generate/{type}` | Generate CISO or CTO report |

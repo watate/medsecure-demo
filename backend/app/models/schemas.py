@@ -205,6 +205,34 @@ class ApiRemediationRequest(BaseModel):
     alert_numbers: list[int]
 
 
+class CopilotAutofixRequest(BaseModel):
+    alert_numbers: list[int]
+    batch_size: int = 10
+
+
+class CopilotAutofixJob(BaseModel):
+    id: int
+    alert_number: int
+    rule_id: str
+    file_path: str
+    status: str
+    autofix_status: str | None = None
+    commit_sha: str | None = None
+    description: str | None = None
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class CopilotAutofixResponse(BaseModel):
+    total_alerts: int
+    completed: int
+    failed: int
+    skipped: int
+    jobs: list[CopilotAutofixJob]
+    message: str
+
+
 class ApiRemediationResponse(BaseModel):
     tool: str
     total_alerts: int
