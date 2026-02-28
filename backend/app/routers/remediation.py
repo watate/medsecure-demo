@@ -1774,22 +1774,9 @@ async def _benchmark_devin(
                         session_id, e,
                     )
 
-            # If cancelled or hard terminal, stop processing further groups
-            if cancel_event and cancel_event.is_set():
-                break
-            if session_id and effective_status in ("error", "suspended", "exit"):
-                # Session ended for real — can't send more messages
-                logger.warning(
-                    "Benchmark %d: Devin session %s reached hard terminal (%s), "
-                    "stopping at group %d/%d",
-                    run_id, session_id, effective_status, idx + 1, len(file_group_items),
-                )
-                failed += sum(
-                    len(fa) for _, fa in file_group_items[idx + 1:]
-                )
-                break
-
             # -- Step 3: Detect new commits from this task --
+            # Run BEFORE the hard-terminal break so that commits from
+            # the current file group (including on "exit") are recorded.
             try:
                 new_commits = await github.list_commits(
                     branch_name, since_sha=last_known_sha,
@@ -1833,6 +1820,21 @@ async def _benchmark_devin(
                     detail=f"Failed to check commits for {file_path}: {str(e)[:200]}",
                     metadata={"error": str(e)[:500], "session_id": session_id},
                 )
+
+            # If cancelled or hard terminal, stop processing further groups
+            if cancel_event and cancel_event.is_set():
+                break
+            if session_id and effective_status in ("error", "suspended", "exit"):
+                # Session ended for real — can't send more messages
+                logger.warning(
+                    "Benchmark %d: Devin session %s reached hard terminal (%s), "
+                    "stopping at group %d/%d",
+                    run_id, session_id, effective_status, idx + 1, len(file_group_items),
+                )
+                failed += sum(
+                    len(fa) for _, fa in file_group_items[idx + 1:]
+                )
+                break
 
         await recorder.record(
             tool="devin",

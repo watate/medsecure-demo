@@ -560,7 +560,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
             <div className="space-y-2">
               {devinSessions.map((session) => (
                 <div
-                  key={session.id}
+                  key={`${session.id}:${session.filePath}`}
                   className="flex items-center gap-3 py-2 px-3 rounded-md border text-sm"
                 >
                   <span className="shrink-0">
