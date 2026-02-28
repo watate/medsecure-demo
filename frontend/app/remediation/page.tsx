@@ -6,6 +6,7 @@ import {
   api,
   type Alert,
   type CostEstimate,
+  type SpotBugsToolResult,
   type ReplayRunWithEvents,
   type ReplayEvent,
 } from "@/lib/api";
@@ -75,6 +76,16 @@ const EVENT_ICONS: Record<string, string> = {
   codeql_ready: "\u2705",
   codeql_timeout: "\u26a0\ufe0f",
 };
+
+const SPOTBUGS_STATUS_STYLES: Record<string, { label: string; className: string }> = {
+  queued: { label: "Queued", className: "bg-gray-100 text-gray-700" },
+  in_progress: { label: "Running", className: "bg-blue-100 text-blue-700 animate-pulse" },
+  completed: { label: "Completed", className: "bg-green-100 text-green-700" },
+  not_found: { label: "Not Found", className: "bg-yellow-100 text-yellow-700" },
+  error: { label: "Error", className: "bg-red-100 text-red-700" },
+};
+
+const SPOTBUGS_POLL_MS = 15_000; // poll SpotBugs status every 15s
 
 const SEVERITY_CONFIG = [
   { key: "critical", label: "Critical", color: "bg-red-500", borderColor: "border-red-500" },
@@ -813,6 +824,55 @@ export default function RemediationPage() {
     }
   };
 
+  // --- SpotBugs Results state ---
+  const [spotbugsResults, setSpotbugsResults] = useState<SpotBugsToolResult[]>([]);
+  const [spotbugsLoading, setSpotbugsLoading] = useState(false);
+  const [spotbugsPolling, setSpotbugsPolling] = useState(false);
+  const spotbugsPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load SpotBugs results
+  const loadSpotbugsResults = useCallback(async () => {
+    try {
+      const data = await api.getSpotBugsResults(selectedRepo, runId ?? undefined);
+      setSpotbugsResults(data.results);
+    } catch {
+      // ignore — may not have any results yet
+    }
+  }, [selectedRepo, runId]);
+
+  // Auto-load SpotBugs results when benchmark completes
+  useEffect(() => {
+    if (!setupCollapsed || !selectedRepo) return;
+    loadSpotbugsResults();
+  }, [setupCollapsed, selectedRepo, loadSpotbugsResults]);
+
+  // Poll SpotBugs while any workflows are still running
+  useEffect(() => {
+    const hasRunning = spotbugsResults.some(
+      (r) => r.workflow_status === "queued" || r.workflow_status === "in_progress"
+    );
+    if (!hasRunning) {
+      if (spotbugsPollRef.current) {
+        clearInterval(spotbugsPollRef.current);
+        spotbugsPollRef.current = null;
+      }
+      setSpotbugsPolling(false);
+      return;
+    }
+
+    setSpotbugsPolling(true);
+    if (!spotbugsPollRef.current) {
+      spotbugsPollRef.current = setInterval(loadSpotbugsResults, SPOTBUGS_POLL_MS);
+    }
+
+    return () => {
+      if (spotbugsPollRef.current) {
+        clearInterval(spotbugsPollRef.current);
+        spotbugsPollRef.current = null;
+      }
+    };
+  }, [spotbugsResults, loadSpotbugsResults]);
+
   // Reset to setup view
   const resetBenchmark = () => {
     setBenchmarkRunning(false);
@@ -1042,6 +1102,116 @@ export default function RemediationPage() {
       {/* Live Replay View */}
       {liveRun && (
         <LiveReplayView run={liveRun} isLive={benchmarkRunning} />
+      )}
+
+      {/* SpotBugs Results */}
+      {setupCollapsed && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>SpotBugs Results</CardTitle>
+                <CardDescription>
+                  Static analysis results from GitHub Actions CI on each tool&rsquo;s branch
+                </CardDescription>
+              </div>
+              <div className="flex items-center gap-2">
+                {spotbugsPolling && (
+                  <Badge className="bg-blue-500 text-white animate-pulse">Polling</Badge>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={async () => {
+                    setSpotbugsLoading(true);
+                    try {
+                      await loadSpotbugsResults();
+                    } finally {
+                      setSpotbugsLoading(false);
+                    }
+                  }}
+                  disabled={spotbugsLoading}
+                >
+                  {spotbugsLoading ? "Loading..." : spotbugsResults.length > 0 ? "Refresh" : "Check Results"}
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {spotbugsResults.length === 0 ? (
+              <p className="text-center text-muted-foreground py-6">
+                No SpotBugs results yet. Click &ldquo;Check Results&rdquo; to fetch CI status.
+              </p>
+            ) : (
+              <div className="space-y-4">
+                {spotbugsResults.map((result) => {
+                  const statusStyle =
+                    result.workflow_conclusion === "failure"
+                      ? { label: "Failed", className: "bg-red-100 text-red-700" }
+                      : SPOTBUGS_STATUS_STYLES[result.workflow_status] ||
+                        SPOTBUGS_STATUS_STYLES.error;
+                  return (
+                    <div
+                      key={`${result.tool}-${result.branch}`}
+                      className={`border rounded-lg p-4 border-l-4 ${
+                        TOOL_BORDER_COLORS[result.tool] || "border-gray-500"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`h-2.5 w-2.5 rounded-full ${
+                              TOOL_COLORS[result.tool] || "bg-gray-400"
+                            }`}
+                          />
+                          <span className={`font-medium text-sm ${TOOL_TEXT_COLORS[result.tool] || ""}`}>
+                            {TOOL_LABELS[result.tool] || result.tool}
+                          </span>
+                          <Badge variant="outline" className="text-xs font-mono">
+                            {result.branch}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {result.bug_count != null && (
+                            <span className="text-sm font-mono font-bold">
+                              {result.bug_count} bug{result.bug_count !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                          <Badge className={statusStyle.className}>
+                            {statusStyle.label}
+                          </Badge>
+                          {result.workflow_url && (
+                            <a
+                              href={result.workflow_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-600 hover:underline"
+                            >
+                              View Run
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                      {result.error && (
+                        <p className="mt-2 text-xs text-red-600">{result.error}</p>
+                      )}
+                      {result.report_content && (
+                        <details className="mt-3">
+                          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+                            SpotBugs report ({result.bug_count ?? "?"} bugs found)
+                          </summary>
+                          <pre className="mt-2 p-3 rounded bg-muted text-[11px] overflow-x-auto max-h-80 overflow-y-auto whitespace-pre-wrap break-all">
+                            {result.report_content}
+                          </pre>
+                        </details>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
       )}
 
       {/* Skeleton loading while benchmark initialises (branch creation, etc.) */}
