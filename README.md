@@ -172,7 +172,7 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 | `NEXT_PUBLIC_API_URL` | No | Backend API URL (default: `http://localhost:8000`) |
 
 # References
-- Devin pricing: [https://devin.ai/pricing](https://devin.ai/pricing)
+- Devin pricing ($2 per ACU): [https://devin.ai/pricing](https://devin.ai/pricing)
 - Pricing for Copilot Autofix cost estimation (3x multiplier for paid plans for Claude Opus 4.6): [https://docs.github.com/en/copilot/concepts/billing/copilot-requests](https://docs.github.com/en/copilot/concepts/billing/copilot-requests)
 - Copilot Autofix can be generated with REST API: [https://github.blog/changelog/2024-12-16-copilot-autofix-can-now-be-generated-with-the-rest-api-public-preview/](https://github.blog/changelog/2024-12-16-copilot-autofix-can-now-be-generated-with-the-rest-api-public-preview/)
 - Copilot Autofix support for different languages rolls out incrementally: [https://github.com/orgs/community/discussions/111094](https://github.com/orgs/community/discussions/111094)

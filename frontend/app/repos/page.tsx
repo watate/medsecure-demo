@@ -85,7 +85,7 @@ export default function ReposPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Repositories</h1>
         <p className="text-muted-foreground mt-1">
-          Manage which repositories MedSecure tracks. All alerts, remediations, and scans are per-repo.
+          Manage which repositories should be tracked. All alerts, remediations, and scans are per-repo.
         </p>
       </div>
 
