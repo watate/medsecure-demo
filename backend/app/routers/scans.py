@@ -23,7 +23,12 @@ from app.services.repo_resolver import (
     resolve_repo,
 )
 from app.services.report_generator import _estimate_api_cost
-from app.services.token_counter import estimate_prompt_tokens_for_alert
+from app.services.replay_recorder import COPILOT_COST_PER_REQUEST, DEVIN_COST_PER_ACU
+from app.services.token_counter import (
+    build_grouped_prompt_for_file,
+    count_tokens,
+    estimate_prompt_tokens_for_alert,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/scans", tags=["scans"])
@@ -31,12 +36,17 @@ router = APIRouter(prefix="/api/scans", tags=["scans"])
 
 def _row_to_branch_summary(row) -> BranchSummary:
     estimated_tokens = 0
+    unique_files = 0
     try:
         # aiosqlite.Row supports `.keys()`
-        if "estimated_prompt_tokens" in row.keys():
+        keys = row.keys()
+        if "estimated_prompt_tokens" in keys:
             estimated_tokens = row["estimated_prompt_tokens"]
+        if "unique_file_count" in keys:
+            unique_files = row["unique_file_count"]
     except Exception:
         estimated_tokens = 0
+        unique_files = 0
 
     return BranchSummary(
         branch=row["branch"],
@@ -51,23 +61,32 @@ def _row_to_branch_summary(row) -> BranchSummary:
         low=row["low"],
         other=row["other"],
         estimated_prompt_tokens=estimated_tokens,
+        unique_file_count=unique_files,
     )
 
 
-async def _compute_baseline_token_estimate(github: GitHubClient, alerts: list[Alert], branch: str) -> int:
-    """Estimate total prompt tokens for baseline open alerts.
+async def _compute_baseline_token_estimate(
+    github: GitHubClient, alerts: list[Alert], branch: str,
+) -> tuple[int, int]:
+    """Estimate total prompt tokens for baseline open alerts using grouped prompts.
+
+    Returns (estimated_tokens, unique_file_count).
+
+    Alerts are grouped by file_path (matching actual remediation behaviour),
+    so each unique file contributes one grouped prompt containing N alert
+    contexts + 1 copy of the file content.
 
     Notes:
     - We dedupe by `file_path` so each source file is fetched once.
     - GitHub Contents API doesn't support true batching, but we do bounded
       concurrency to keep scans fast while avoiding bursts.
-    - If we hit GitHub rate limits, we return 0 so callers can fall back to the
-      heuristic per-alert estimate.
+    - If we hit GitHub rate limits, we return (0, 0) so callers can fall back
+      to the heuristic per-alert estimate.
     """
 
     open_alerts = [a for a in alerts if a.state.lower() == "open" and a.file_path]
     if not open_alerts:
-        return 0
+        return 0, 0
 
     unique_paths = sorted({a.file_path for a in open_alerts})
     file_cache: dict[str, str] = {}
@@ -103,22 +122,50 @@ async def _compute_baseline_token_estimate(github: GitHubClient, alerts: list[Al
 
     if rate_limited:
         logger.warning("GitHub rate limited while fetching file contents; falling back to heuristic token estimate")
-        return 0
+        return 0, len(unique_paths)
+
+    # Group alerts by file (matching remediation behaviour)
+    from collections import defaultdict
+    file_groups: dict[str, list[Alert]] = defaultdict(list)
+    for alert in open_alerts:
+        file_groups[alert.file_path].append(alert)
 
     total_tokens = 0
-    for alert in open_alerts:
-        total_tokens += estimate_prompt_tokens_for_alert(
-            alert_rule_id=alert.rule_id,
-            alert_severity=alert.severity,
-            alert_rule_description=alert.rule_description,
-            alert_message=alert.message,
-            alert_file_path=alert.file_path,
-            alert_start_line=alert.start_line,
-            alert_end_line=alert.end_line,
-            file_content=file_cache.get(alert.file_path, ""),
-        )
+    for fpath, group_alerts in file_groups.items():
+        file_content = file_cache.get(fpath, "")
+        if len(group_alerts) == 1:
+            # Single alert: use per-alert prompt
+            a = group_alerts[0]
+            total_tokens += estimate_prompt_tokens_for_alert(
+                alert_rule_id=a.rule_id,
+                alert_severity=a.severity,
+                alert_rule_description=a.rule_description,
+                alert_message=a.message,
+                alert_file_path=a.file_path,
+                alert_start_line=a.start_line,
+                alert_end_line=a.end_line,
+                file_content=file_content,
+            )
+        else:
+            # Multiple alerts in same file: use grouped prompt (N contexts + 1 file)
+            prompt = build_grouped_prompt_for_file(
+                file_path=fpath,
+                file_content=file_content,
+                alerts=[
+                    {
+                        "rule_id": a.rule_id,
+                        "severity": a.severity,
+                        "rule_description": a.rule_description,
+                        "message": a.message,
+                        "start_line": a.start_line,
+                        "end_line": a.end_line,
+                    }
+                    for a in group_alerts
+                ],
+            )
+            total_tokens += count_tokens(prompt)
 
-    return total_tokens
+    return total_tokens, len(file_groups)
 
 
 @router.post("/trigger", response_model=TriggerScanResponse)
@@ -216,13 +263,13 @@ async def trigger_scan(
                 logger.exception("Failed to scan %s (%s)", resolved_repo, branch)
 
         # Compute dynamic token estimates for baseline open alerts
-        estimated_tokens = await _compute_baseline_token_estimate(
+        estimated_tokens, unique_file_count = await _compute_baseline_token_estimate(
             github, baseline_alerts, baseline_branch
         )
-        if estimated_tokens > 0:
+        if estimated_tokens > 0 or unique_file_count > 0:
             await db.execute(
-                "UPDATE scan_branches SET estimated_prompt_tokens = ? WHERE scan_id = ? AND tool = 'baseline'",
-                (estimated_tokens, scan_id),
+                "UPDATE scan_branches SET estimated_prompt_tokens = ?, unique_file_count = ? WHERE scan_id = ? AND tool = 'baseline'",
+                (estimated_tokens, unique_file_count, scan_id),
             )
 
         await db.commit()
@@ -353,10 +400,43 @@ async def compare_latest(
             "fix_rate_pct": round((1 - tool_summary.open / baseline.open) * 100, 1) if baseline.open > 0 else 0.0,
         }
 
-        # Pre-remediation cost estimate for API-based tools (using dynamic token count)
-        cost_data = _estimate_api_cost(tool_name, baseline.open, baseline.estimated_prompt_tokens)
-        if cost_data:
-            cost_estimates[tool_name] = CostEstimate(**cost_data)
+        # Pre-remediation cost estimate for all tools
+        if tool_name in ("anthropic", "openai", "gemini"):
+            # Token-based pricing for API tools
+            cost_data = _estimate_api_cost(tool_name, baseline.open, baseline.estimated_prompt_tokens)
+            if cost_data:
+                cost_estimates[tool_name] = CostEstimate(**cost_data)
+        elif tool_name == "copilot":
+            # Copilot Autofix: $0.04 per request (flat rate per alert)
+            total_cost = baseline.open * COPILOT_COST_PER_REQUEST
+            cost_estimates[tool_name] = CostEstimate(
+                model="Copilot Autofix",
+                pricing_type="per_request",
+                total_cost_usd=round(total_cost, 4),
+                alerts_processed=baseline.open,
+                cost_per_request_usd=COPILOT_COST_PER_REQUEST,
+            )
+        elif tool_name == "devin":
+            # Devin: $2.00/ACU, estimated 0.09 ACU per session
+            # 1 session per unique file (alerts grouped by file)
+            session_count = baseline.unique_file_count if baseline.unique_file_count > 0 else baseline.open
+            estimated_acus = session_count * 0.09
+            total_cost = estimated_acus * DEVIN_COST_PER_ACU
+            assumption = (
+                f"Assumes ~0.09 ACU per session, {session_count} sessions "
+                f"({baseline.open} alerts grouped into {session_count} files)"
+            ) if baseline.unique_file_count > 0 else (
+                f"Assumes ~0.09 ACU per session (1 session per alert)"
+            )
+            cost_estimates[tool_name] = CostEstimate(
+                model="Devin (ACU-based)",
+                pricing_type="acu",
+                total_cost_usd=round(total_cost, 4),
+                alerts_processed=baseline.open,
+                estimated_acus=round(estimated_acus, 2),
+                cost_per_acu_usd=DEVIN_COST_PER_ACU,
+                assumption=assumption,
+            )
 
     return ComparisonResult(
         repo=scan.repo,

@@ -42,7 +42,8 @@ async def init_db() -> None:
                 medium INTEGER NOT NULL DEFAULT 0,
                 low INTEGER NOT NULL DEFAULT 0,
                 other INTEGER NOT NULL DEFAULT 0,
-                estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0
+                estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                unique_file_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS alerts (
@@ -163,6 +164,10 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE scan_branches ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
             )
+        if "unique_file_count" not in columns:
+            await db.execute(
+                "ALTER TABLE scan_branches ADD COLUMN unique_file_count INTEGER NOT NULL DEFAULT 0"
+            )
 
         cursor = await db.execute("PRAGMA table_info(replay_events)")
         re_columns = {row[1] for row in await cursor.fetchall()}
@@ -261,14 +266,15 @@ async def init_db() -> None:
                     file_path TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'running',
                     pr_url TEXT,
+                    acus REAL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
                 INSERT INTO devin_sessions_new
                     (id, repo, session_id, alert_number, rule_id,
-                     file_path, status, pr_url, created_at, updated_at)
+                     file_path, status, pr_url, acus, created_at, updated_at)
                     SELECT id, repo, session_id, alert_number, rule_id,
-                           file_path, status, pr_url, created_at, updated_at
+                           file_path, status, pr_url, acus, created_at, updated_at
                     FROM devin_sessions;
                 DROP TABLE devin_sessions;
                 ALTER TABLE devin_sessions_new

@@ -203,21 +203,43 @@ export default function DashboardPage() {
                       <SeverityBar label="Low" count={summary.low} total={comparison.baseline.low || 1} color="bg-blue-500" />
                     </div>
 
-                    {/* Cost estimate for API-based tools */}
-                    {comparison.cost_estimates?.[toolName] && (
-                      <div className="pt-3 border-t">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs text-muted-foreground">Est. remediation cost</span>
-                          <span className="text-sm font-semibold">
-                            ${comparison.cost_estimates[toolName].total_cost_usd.toFixed(4)}
-                          </span>
+                    {/* Cost estimate for all tools */}
+                    {comparison.cost_estimates?.[toolName] && (() => {
+                      const est = comparison.cost_estimates[toolName];
+                      return (
+                        <div className="pt-3 border-t">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">Est. remediation cost</span>
+                            <span className="text-sm font-semibold text-amber-600">
+                              ${est.total_cost_usd.toFixed(4)}
+                            </span>
+                          </div>
+                          {est.pricing_type === "token" && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {est.model} &middot;{" "}
+                              {est.estimated_input_tokens.toLocaleString()} tokens
+                            </p>
+                          )}
+                          {est.pricing_type === "per_request" && (
+                            <p className="text-xs text-muted-foreground mt-1">
+                              ${est.cost_per_request_usd}/alert &times; {est.alerts_processed} alerts
+                            </p>
+                          )}
+                          {est.pricing_type === "acu" && (
+                            <>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                {est.estimated_acus} ACUs &times; ${est.cost_per_acu_usd}/ACU
+                              </p>
+                              {est.assumption && (
+                                <p className="text-[10px] text-muted-foreground/70 mt-0.5 italic">
+                                  {est.assumption}
+                                </p>
+                              )}
+                            </>
+                          )}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          {comparison.cost_estimates[toolName].model} &middot;{" "}
-                          {comparison.cost_estimates[toolName].estimated_input_tokens.toLocaleString()} tokens
-                        </p>
-                      </div>
-                    )}
+                      );
+                    })()}
                   </CardContent>
                 </Card>
               );

@@ -429,7 +429,7 @@ def _build_price_comparison(tool_data: dict) -> dict:
             continue
         fixed = data.get("total_fixed", 0)
         total = cost_est.get("total_cost_usd", 0)
-        cost_per_fix = round(total / fixed, 4) if fixed > 0 else 0
+        cost_per_fix = round(total / fixed, 4) if fixed > 0 else float('inf')
         comparison[tool_name] = {
             "display_name": TOOL_DISPLAY_NAMES.get(tool_name, tool_name),
             "pricing_type": cost_est.get("pricing_type", "unknown"),
