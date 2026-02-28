@@ -792,8 +792,8 @@ async def refresh_devin_sessions(
                 await db.execute(
                     """UPDATE devin_sessions
                        SET status = ?, pr_url = ?, acus = COALESCE(?, acus), updated_at = datetime('now')
-                       WHERE repo = ? AND session_id = ?""",
-                    (new_status, pr_url, acus, row["repo"], sid),
+                       WHERE repo = ? AND session_id = ? AND file_path = ?""",
+                    (new_status, pr_url, acus, row["repo"], sid, row["file_path"]),
                 )
                 updated_count += 1
             except Exception:
@@ -1824,10 +1824,10 @@ async def _benchmark_devin(
             # If cancelled or hard terminal, stop processing further groups
             if cancel_event and cancel_event.is_set():
                 break
-            if session_id and effective_status in ("error", "suspended", "exit"):
-                # Session ended for real — can't send more messages
+            if session_id and effective_status in ("error", "suspended", "exit", "unknown"):
+                # Session ended for real or timed out — can't send more messages
                 logger.warning(
-                    "Benchmark %d: Devin session %s reached hard terminal (%s), "
+                    "Benchmark %d: Devin session %s reached terminal/timeout (%s), "
                     "stopping at group %d/%d",
                     run_id, session_id, effective_status, idx + 1, len(file_group_items),
                 )
