@@ -371,6 +371,45 @@ class GitHubClient:
         # Timed out — return last known status
         return await self.get_autofix_status(alert_number)
 
+    async def list_commits(
+        self, branch: str, since_sha: str | None = None, per_page: int = 100,
+    ) -> list[dict]:
+        """List commits on a branch, optionally only those after *since_sha*.
+
+        Returns a list of dicts with keys: sha, message, author, date.
+        When *since_sha* is provided the returned list excludes that commit
+        and all of its ancestors (i.e. only newer commits are returned).
+        """
+        params: dict[str, str | int] = {
+            "sha": branch,
+            "per_page": per_page,
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/commits",
+                headers=self.headers,
+                params=params,
+            )
+            response.raise_for_status()
+            raw_commits = response.json()
+
+        commits: list[dict] = []
+        for item in raw_commits:
+            sha = item.get("sha", "")
+            if since_sha and sha == since_sha:
+                # We've reached the starting point — stop collecting
+                break
+            commit_obj = item.get("commit", {})
+            author_obj = commit_obj.get("author", {})
+            commits.append({
+                "sha": sha,
+                "message": commit_obj.get("message", ""),
+                "author": author_obj.get("name", ""),
+                "date": author_obj.get("date", ""),
+            })
+        return commits
+
     async def get_file_content(self, path: str, ref: str) -> str:
         """Get file content from a specific branch."""
         async with httpx.AsyncClient(timeout=30.0) as client:

@@ -1158,6 +1158,11 @@ INTER_TOOL_DELAY = 1.0  # seconds between launching tool tasks (rate-limit frien
 CODEQL_POLL_INTERVAL = 30.0  # seconds between CodeQL readiness checks
 CODEQL_MAX_WAIT = 20 * 60  # 20 minutes max wait for CodeQL analysis
 
+# Devin session polling configuration
+DEVIN_POLL_INTERVAL = 30.0  # seconds between Devin session status checks
+DEVIN_MAX_WAIT = 30 * 60   # 30 minutes max wait for Devin sessions
+DEVIN_TERMINAL_STATES = {"exit", "error", "suspended"}
+
 # In-memory cancel events for running benchmarks (run_id -> asyncio.Event)
 _cancel_events: dict[int, asyncio.Event] = {}
 
@@ -1383,7 +1388,13 @@ async def _benchmark_devin(
     branch_name: str | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> None:
-    """Background task: run Devin remediation and record to shared run."""
+    """Background task: run Devin remediation, poll for completion, and record commits.
+
+    Three phases:
+    1. Create Devin sessions (one per file group)
+    2. Poll sessions until all reach a terminal state (exit/error/suspended)
+    3. Detect new commits on the branch and record patch_applied events
+    """
     if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
         await recorder.record(
@@ -1430,8 +1441,14 @@ async def _benchmark_devin(
 
     db = await get_db()
     sessions_created = 0
+    # Map session_id -> (file_path, alert list) for tracking
+    session_map: dict[str, tuple[str, list[Alert]]] = {}
 
     try:
+        # Capture branch HEAD before Devin pushes any commits
+        initial_branch_sha = await github.get_branch_sha(branch_name)
+
+        # ---- Phase 1: Create Devin sessions ----
         for idx, (file_path, file_alerts) in enumerate(file_groups.items()):
             # Check for cancellation before each session
             if cancel_event and cancel_event.is_set():
@@ -1480,6 +1497,8 @@ async def _benchmark_devin(
                     )
                 await db.commit()
 
+                session_map[session_id] = (file_path, file_alerts)
+
                 await recorder.record(
                     tool="devin",
                     event_type="analyzing",
@@ -1503,15 +1522,204 @@ async def _benchmark_devin(
                     metadata={"error": str(e)[:500], "file_path": file_path},
                 )
 
+        # If cancelled during creation or no sessions were created, skip polling
+        if (cancel_event and cancel_event.is_set()) or not session_map:
+            completed = 0
+            failed = len(alerts) if not session_map else 0
+        else:
+            # ---- Phase 2: Poll sessions until all reach terminal state ----
+            await recorder.record(
+                tool="devin",
+                event_type="polling_started",
+                detail=(
+                    f"Polling {len(session_map)} Devin session(s) for completion "
+                    f"(timeout: {DEVIN_MAX_WAIT // 60}min)"
+                ),
+                metadata={
+                    "session_ids": list(session_map.keys()),
+                    "timeout_s": DEVIN_MAX_WAIT,
+                },
+            )
+
+            finished_sessions: dict[str, str] = {}  # session_id -> terminal status
+            poll_start = _time.monotonic()
+
+            while len(finished_sessions) < len(session_map):
+                # Check for cancellation
+                if cancel_event and cancel_event.is_set():
+                    await recorder.record(
+                        tool="devin",
+                        event_type="cancelled",
+                        detail=(
+                            f"Devin polling cancelled — "
+                            f"{len(finished_sessions)}/{len(session_map)} sessions finished"
+                        ),
+                        metadata={"finished": dict(finished_sessions)},
+                    )
+                    break
+
+                # Check timeout
+                elapsed = _time.monotonic() - poll_start
+                if elapsed > DEVIN_MAX_WAIT:
+                    not_done = [
+                        sid for sid in session_map if sid not in finished_sessions
+                    ]
+                    logger.warning(
+                        "Benchmark %d: Devin polling timed out after %.0fs. "
+                        "Unfinished sessions: %s",
+                        run_id, elapsed, not_done,
+                    )
+                    await recorder.record(
+                        tool="devin",
+                        event_type="polling_timeout",
+                        detail=(
+                            f"Devin polling timed out after {int(elapsed)}s — "
+                            f"{len(finished_sessions)}/{len(session_map)} sessions finished"
+                        ),
+                        metadata={
+                            "finished": dict(finished_sessions),
+                            "unfinished": not_done,
+                            "elapsed_s": int(elapsed),
+                        },
+                    )
+                    break
+
+                # Poll each unfinished session
+                for session_id in session_map:
+                    if session_id in finished_sessions:
+                        continue
+                    try:
+                        status_data = await devin.get_session_status(session_id)
+                        status = status_data.get("status", "unknown")
+
+                        if status in DEVIN_TERMINAL_STATES:
+                            finished_sessions[session_id] = status
+                            file_path, file_alerts = session_map[session_id]
+
+                            # Compute cost from ACUs consumed
+                            acus = status_data.get("acus_consumed")
+                            cost = compute_devin_session_cost(acus) if acus else None
+
+                            await recorder.record(
+                                tool="devin",
+                                event_type="session_complete",
+                                detail=(
+                                    f"Devin session {session_id} finished "
+                                    f"with status '{status}' for {file_path}"
+                                ),
+                                alert_number=file_alerts[0].number,
+                                metadata={
+                                    "session_id": session_id,
+                                    "status": status,
+                                    "file_path": file_path,
+                                    "acus_consumed": acus,
+                                    "session_url": status_data.get("url", ""),
+                                },
+                                cost_usd=cost,
+                            )
+
+                            # Update devin_sessions table
+                            prs = status_data.get("pull_requests", [])
+                            pr_url = prs[0].get("pr_url") if prs else None
+                            await db.execute(
+                                """UPDATE devin_sessions
+                                   SET status = ?, pr_url = ?,
+                                       acus = COALESCE(?, acus),
+                                       updated_at = datetime('now')
+                                   WHERE repo = ? AND session_id = ?""",
+                                (status, pr_url, acus, resolved_repo, session_id),
+                            )
+                            await db.commit()
+
+                    except Exception as e:
+                        logger.warning(
+                            "Benchmark devin: failed to poll session %s: %s",
+                            session_id, e,
+                        )
+
+                # Wait before next poll cycle
+                if len(finished_sessions) < len(session_map):
+                    await asyncio.sleep(DEVIN_POLL_INTERVAL)
+
+            # ---- Phase 3: Detect new commits on the branch ----
+            completed = 0
+            failed = 0
+
+            try:
+                new_commits = await github.list_commits(
+                    branch_name, since_sha=initial_branch_sha,
+                )
+
+                if new_commits:
+                    await recorder.record(
+                        tool="devin",
+                        event_type="commits_detected",
+                        detail=(
+                            f"Found {len(new_commits)} new commit(s) on {branch_name}"
+                        ),
+                        metadata={
+                            "commit_count": len(new_commits),
+                            "commits": [
+                                {"sha": c["sha"][:8], "message": c["message"][:120]}
+                                for c in new_commits
+                            ],
+                        },
+                    )
+
+                    for commit in new_commits:
+                        await recorder.record(
+                            tool="devin",
+                            event_type="patch_applied",
+                            detail=f"Devin committed: {commit['message'][:120]}",
+                            metadata={
+                                "commit_sha": commit["sha"],
+                                "branch": branch_name,
+                                "commit_message": commit["message"],
+                                "author": commit["author"],
+                            },
+                        )
+                    completed = len(new_commits)
+                else:
+                    logger.info(
+                        "Benchmark %d: no new commits on %s from Devin",
+                        run_id, branch_name,
+                    )
+
+            except Exception as e:
+                logger.exception(
+                    "Benchmark devin: failed to list commits on %s", branch_name,
+                )
+                await recorder.record(
+                    tool="devin",
+                    event_type="error",
+                    detail=f"Failed to check commits on {branch_name}: {str(e)[:200]}",
+                    metadata={"error": str(e)[:500]},
+                )
+
+            # Count sessions that ended in error/suspended as failed
+            for session_id, status in finished_sessions.items():
+                if status != "exit":
+                    file_path, file_alerts = session_map[session_id]
+                    failed += len(file_alerts)
+
+            # Count unfinished sessions (timed out) as failed too
+            for session_id in session_map:
+                if session_id not in finished_sessions:
+                    file_path, file_alerts = session_map[session_id]
+                    failed += len(file_alerts)
+
         await recorder.record(
             tool="devin",
             event_type="remediation_complete",
             detail=(
-                f"Devin: created {sessions_created} session(s) for "
-                f"{len(alerts)} alerts across {len(file_groups)} files"
+                f"Devin complete: {sessions_created} session(s), "
+                f"{completed} commit(s), {failed} failed "
+                f"out of {len(alerts)} alerts"
             ),
             metadata={
                 "sessions_created": sessions_created,
+                "commits": completed,
+                "failed": failed,
                 "total_alerts": len(alerts),
                 "file_count": len(file_groups),
                 "branch": branch_name,
@@ -1678,181 +1886,178 @@ async def _run_benchmark_tasks(
     import time as _time_mod
     run_start_time = _time_mod.monotonic()
 
-    github = GitHubClient(repo=resolved_repo)
+    try:
+        github = GitHubClient(repo=resolved_repo)
 
-    # ---- Phase 1: Wait for CodeQL readiness on each branch ----
-    if branch_map:
-        recorder = await ReplayRecorder.attach(
-            run_id, tools, resolved_repo, start_time=run_start_time,
-        )
+        # ---- Phase 1: Wait for CodeQL readiness on each branch ----
+        if branch_map:
+            recorder = await ReplayRecorder.attach(
+                run_id, tools, resolved_repo, start_time=run_start_time,
+            )
 
-        # Get baseline alert count as the target
-        baseline_alerts = await github.get_alerts(baseline_branch, state="open")
-        baseline_count = len(baseline_alerts)
-        logger.info(
-            "Benchmark %d: baseline branch '%s' has %d open alerts",
-            run_id, baseline_branch, baseline_count,
-        )
+            # Get baseline alert count as the target
+            baseline_alerts = await github.get_alerts(baseline_branch, state="open")
+            baseline_count = len(baseline_alerts)
+            logger.info(
+                "Benchmark %d: baseline branch '%s' has %d open alerts",
+                run_id, baseline_branch, baseline_count,
+            )
 
-        await recorder.record(
-            tool="benchmark",
-            event_type="codeql_waiting",
-            detail=(
-                f"Waiting for CodeQL to analyze {len(branch_map)} branches "
-                f"(target: {baseline_count} alerts per branch)"
-            ),
-            metadata={
-                "baseline_count": baseline_count,
-                "branches": branch_map,
-            },
-        )
+            await recorder.record(
+                tool="benchmark",
+                event_type="codeql_waiting",
+                detail=(
+                    f"Waiting for CodeQL to analyze {len(branch_map)} branches "
+                    f"(target: {baseline_count} alerts per branch)"
+                ),
+                metadata={
+                    "baseline_count": baseline_count,
+                    "branches": branch_map,
+                },
+            )
 
-        ready_branches: set[str] = set()
-        start_wait = _time_mod.monotonic()
+            ready_branches: set[str] = set()
+            start_wait = _time_mod.monotonic()
 
-        while len(ready_branches) < len(branch_map):
-            # Check for cancellation during polling
-            if cancel_event and cancel_event.is_set():
-                await recorder.record(
-                    tool="benchmark",
-                    event_type="cancelled",
-                    detail="Benchmark cancelled during CodeQL wait phase",
-                    metadata={"ready_branches": list(ready_branches)},
-                )
-                break
-
-            # Check timeout
-            elapsed = _time_mod.monotonic() - start_wait
-            if elapsed > CODEQL_MAX_WAIT:
-                not_ready = [
-                    t for t in branch_map if t not in ready_branches
-                ]
-                logger.warning(
-                    "Benchmark %d: CodeQL wait timed out after %.0fs. "
-                    "Not ready: %s",
-                    run_id, elapsed, not_ready,
-                )
-                await recorder.record(
-                    tool="benchmark",
-                    event_type="codeql_timeout",
-                    detail=(
-                        f"CodeQL wait timed out after {int(elapsed)}s. "
-                        f"Proceeding with {len(ready_branches)}/{len(branch_map)} ready."
-                    ),
-                    metadata={
-                        "ready": list(ready_branches),
-                        "not_ready": not_ready,
-                        "elapsed_s": int(elapsed),
-                    },
-                )
-                break
-
-            # Poll each not-yet-ready branch
-            for tool_name, branch in branch_map.items():
-                if tool_name in ready_branches:
-                    continue
-                try:
-                    branch_alerts = await github.get_alerts(branch, state="open")
-                    if len(branch_alerts) >= baseline_count:
-                        ready_branches.add(tool_name)
-                        await recorder.record(
-                            tool=tool_name,
-                            event_type="codeql_ready",
-                            detail=(
-                                f"Branch {branch} ready: "
-                                f"{len(branch_alerts)} alerts (target: {baseline_count})"
-                            ),
-                            metadata={
-                                "branch": branch,
-                                "alert_count": len(branch_alerts),
-                                "baseline_count": baseline_count,
-                            },
-                        )
-                except Exception as e:
-                    logger.debug(
-                        "Benchmark %d: polling %s failed (expected during analysis): %s",
-                        run_id, branch, e,
+            while len(ready_branches) < len(branch_map):
+                # Check for cancellation during polling
+                if cancel_event and cancel_event.is_set():
+                    await recorder.record(
+                        tool="benchmark",
+                        event_type="cancelled",
+                        detail="Benchmark cancelled during CodeQL wait phase",
+                        metadata={"ready_branches": list(ready_branches)},
                     )
+                    break
 
-            if len(ready_branches) < len(branch_map):
-                await asyncio.sleep(CODEQL_POLL_INTERVAL)
+                # Check timeout
+                elapsed = _time_mod.monotonic() - start_wait
+                if elapsed > CODEQL_MAX_WAIT:
+                    not_ready = [
+                        t for t in branch_map if t not in ready_branches
+                    ]
+                    logger.warning(
+                        "Benchmark %d: CodeQL wait timed out after %.0fs. "
+                        "Not ready: %s",
+                        run_id, elapsed, not_ready,
+                    )
+                    await recorder.record(
+                        tool="benchmark",
+                        event_type="codeql_timeout",
+                        detail=(
+                            f"CodeQL wait timed out after {int(elapsed)}s. "
+                            f"Proceeding with {len(ready_branches)}/{len(branch_map)} ready."
+                        ),
+                        metadata={
+                            "ready": list(ready_branches),
+                            "not_ready": not_ready,
+                            "elapsed_s": int(elapsed),
+                        },
+                    )
+                    break
 
-        # If cancelled during wait, clean up and exit
-        if cancel_event and cancel_event.is_set():
-            final_status = "cancelled"
-            db = await get_db()
-            try:
-                now = datetime.now(timezone.utc).isoformat()
+                # Poll each not-yet-ready branch
+                for tool_name, branch in branch_map.items():
+                    if tool_name in ready_branches:
+                        continue
+                    try:
+                        branch_alerts = await github.get_alerts(branch, state="open")
+                        if len(branch_alerts) >= baseline_count:
+                            ready_branches.add(tool_name)
+                            await recorder.record(
+                                tool=tool_name,
+                                event_type="codeql_ready",
+                                detail=(
+                                    f"Branch {branch} ready: "
+                                    f"{len(branch_alerts)} alerts (target: {baseline_count})"
+                                ),
+                                metadata={
+                                    "branch": branch,
+                                    "alert_count": len(branch_alerts),
+                                    "baseline_count": baseline_count,
+                                },
+                            )
+                    except Exception as e:
+                        logger.debug(
+                            "Benchmark %d: polling %s failed (expected during analysis): %s",
+                            run_id, branch, e,
+                        )
+
+                if len(ready_branches) < len(branch_map):
+                    await asyncio.sleep(CODEQL_POLL_INTERVAL)
+
+            # If cancelled during wait, return early (finally block handles cleanup)
+            if cancel_event and cancel_event.is_set():
+                return
+
+        # ---- Phase 2: Launch tool remediation tasks ----
+        tasks: list[asyncio.Task[None]] = []
+
+        for i, tool in enumerate(tools):
+            # Stagger tool launches to be rate-limit friendly
+            if i > 0:
+                await asyncio.sleep(INTER_TOOL_DELAY)
+
+            tool_branch = branch_map.get(tool) if branch_map else None
+
+            if tool == "devin":
+                task = asyncio.create_task(
+                    _benchmark_devin(
+                        run_id, alerts, resolved_repo, baseline_branch,
+                        start_time=run_start_time,
+                        branch_name=tool_branch,
+                        cancel_event=cancel_event,
+                    )
+                )
+            elif tool == "copilot":
+                task = asyncio.create_task(
+                    _benchmark_copilot(
+                        run_id, alerts, resolved_repo, baseline_branch,
+                        start_time=run_start_time,
+                        branch_name=tool_branch,
+                        cancel_event=cancel_event,
+                    )
+                )
+            elif tool in _API_TOOL_CONFIG:
+                task = asyncio.create_task(
+                    _benchmark_api_tool(
+                        tool, run_id, alerts, resolved_repo, baseline_branch,
+                        start_time=run_start_time,
+                        branch_name=tool_branch,
+                        cancel_event=cancel_event,
+                    )
+                )
+            else:
+                continue
+            tasks.append(task)
+
+        # Wait for all tools to finish
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    except Exception:
+        logger.exception("Benchmark %d: _run_benchmark_tasks failed", run_id)
+    finally:
+        # Always clean up cancel event and mark the run as finished
+        _cancel_events.pop(run_id, None)
+
+        final_status = "cancelled" if (cancel_event and cancel_event.is_set()) else "completed"
+        db = await get_db()
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            # Use 'failed' if we hit an unexpected exception (run was still 'running')
+            cursor = await db.execute(
+                "SELECT status FROM replay_runs WHERE id = ?", (run_id,),
+            )
+            row = await cursor.fetchone()
+            if row and row["status"] == "running":
                 await db.execute(
                     "UPDATE replay_runs SET status = ?, ended_at = ? WHERE id = ?",
                     (final_status, now, run_id),
                 )
                 await db.commit()
-            finally:
-                await db.close()
-            _cancel_events.pop(run_id, None)
-            return
-
-    # ---- Phase 2: Launch tool remediation tasks ----
-    tasks: list[asyncio.Task[None]] = []
-
-    for i, tool in enumerate(tools):
-        # Stagger tool launches to be rate-limit friendly
-        if i > 0:
-            await asyncio.sleep(INTER_TOOL_DELAY)
-
-        tool_branch = branch_map.get(tool) if branch_map else None
-
-        if tool == "devin":
-            task = asyncio.create_task(
-                _benchmark_devin(
-                    run_id, alerts, resolved_repo, baseline_branch,
-                    start_time=run_start_time,
-                    branch_name=tool_branch,
-                    cancel_event=cancel_event,
-                )
-            )
-        elif tool == "copilot":
-            task = asyncio.create_task(
-                _benchmark_copilot(
-                    run_id, alerts, resolved_repo, baseline_branch,
-                    start_time=run_start_time,
-                    branch_name=tool_branch,
-                    cancel_event=cancel_event,
-                )
-            )
-        elif tool in _API_TOOL_CONFIG:
-            task = asyncio.create_task(
-                _benchmark_api_tool(
-                    tool, run_id, alerts, resolved_repo, baseline_branch,
-                    start_time=run_start_time,
-                    branch_name=tool_branch,
-                    cancel_event=cancel_event,
-                )
-            )
-        else:
-            continue
-        tasks.append(task)
-
-    # Wait for all tools to finish
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Clean up cancel event
-    _cancel_events.pop(run_id, None)
-
-    # Mark the shared run as completed (or cancelled)
-    final_status = "cancelled" if (cancel_event and cancel_event.is_set()) else "completed"
-    db = await get_db()
-    try:
-        now = datetime.now(timezone.utc).isoformat()
-        await db.execute(
-            "UPDATE replay_runs SET status = ?, ended_at = ? WHERE id = ?",
-            (final_status, now, run_id),
-        )
-        await db.commit()
-    finally:
-        await db.close()
+        finally:
+            await db.close()
 
 
 @router.post("/benchmark", response_model=BenchmarkResponse)
