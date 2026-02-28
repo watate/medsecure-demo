@@ -5,7 +5,7 @@ Automated CodeQL remediation across AI tools (Devin, Anthropic, OpenAI, Google).
 ## How It Works
 
 1. **Scan** — Fetches open CodeQL alerts from your repo's `main` branch via GitHub API.
-2. **Branch** — Creates a fresh `remediate/{tool}-{timestamp}` branch from `main` automatically. No manual branch setup needed.
+2. **Branch** — Creates a fresh `remediate/{tool}-{timestamp}` branch from `main` automatically
 3. **Group & Fix** — Groups alerts by file so multiple vulnerabilities in the same file are fixed in one pass (one LLM call, one commit per file). Avoids merge conflicts.
 4. **Replay** — Every step is recorded with rich metadata (model, tokens, latency, commit SHAs). The VP of Engineering can play back any run to stakeholders without re-running it.
 
@@ -174,6 +174,10 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 # References
 - Devin pricing: [https://devin.ai/pricing](https://devin.ai/pricing)
 - Pricing for Copilot Autofix cost estimation (3x multiplier for paid plans for Claude Opus 4.6): [https://docs.github.com/en/copilot/concepts/billing/copilot-requests](https://docs.github.com/en/copilot/concepts/billing/copilot-requests)
+- Copilot Autofix can be generated with REST API: [https://github.blog/changelog/2024-12-16-copilot-autofix-can-now-be-generated-with-the-rest-api-public-preview/](https://github.blog/changelog/2024-12-16-copilot-autofix-can-now-be-generated-with-the-rest-api-public-preview/)
+- Copilot Autofix support for different languages rolls out incrementally: [https://github.com/orgs/community/discussions/111094](https://github.com/orgs/community/discussions/111094)
+- Copilot Autofix uses GPT-5.1: [https://docs.github.com/en/code-security/responsible-use/responsible-use-autofix-code-scanning](https://docs.github.com/en/code-security/responsible-use/responsible-use-autofix-code-scanning)
+- Copilot Autofix is $0.04/request: [https://docs.github.com/en/copilot/get-started/plans#comparing-copilot-plans](https://docs.github.com/en/copilot/get-started/plans#comparing-copilot-plans)
 - Anthropic model pricing: [https://platform.claude.com/docs/en/about-claude/models/overview](https://platform.claude.com/docs/en/about-claude/models/overview)
 - GPT-5.3-Codex pricing: [https://developers.openai.com/api/docs/models/gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex)
 - gemini-3.1-pro-preview pricing: [https://ai.google.dev/gemini-api/docs/pricing](https://ai.google.dev/gemini-api/docs/pricing)
