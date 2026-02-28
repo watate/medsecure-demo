@@ -80,6 +80,7 @@ async def add_event(
             detail=detail,
             alert_number=alert_number,
             timestamp_offset_ms=timestamp_offset_ms,
+            metadata={},
             created_at=now,
         )
     finally:
@@ -154,6 +155,7 @@ async def get_run(run_id: int) -> ReplayRunWithEvents:
                 detail=row["detail"],
                 alert_number=row["alert_number"],
                 timestamp_offset_ms=row["timestamp_offset_ms"],
+                metadata=json.loads(row["metadata"]) if row["metadata"] else {},
                 created_at=row["created_at"],
             )
             for row in event_rows

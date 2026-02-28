@@ -15,7 +15,8 @@ from app.services.database import get_db
 from app.services.devin_client import DevinClient
 from app.services.github_client import GitHubClient
 from app.services.llm_client import call_llm_with_delay
-from app.services.token_counter import build_prompt_for_alert
+from app.services.replay_recorder import ReplayRecorder
+from app.services.token_counter import build_prompt_for_alert, count_tokens
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/remediate", tags=["remediation"])
@@ -50,6 +51,16 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
     # Limit batch size
     alerts = alerts[: request.batch_size]
 
+    # Start replay recording
+    recorder = ReplayRecorder(tools=["devin"])
+    await recorder.start()
+    await recorder.record(
+        tool="devin",
+        event_type="scan_started",
+        detail=f"CodeQL scan detected {len(alerts)} open alerts on {branch}",
+        metadata={"branch": branch, "alert_count": len(alerts)},
+    )
+
     db = await get_db()
     sessions_created: list[DevinSession] = []
 
@@ -63,9 +74,36 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
             existing = await cursor.fetchone()
             if existing:
                 logger.info("Skipping alert %d, already has session %s", alert.number, existing["session_id"])
+                await recorder.record(
+                    tool="devin",
+                    event_type="alert_skipped",
+                    detail=f"Alert #{alert.number} already has active session {existing['session_id']}",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                        "existing_session_id": existing["session_id"],
+                    },
+                )
                 continue
 
             try:
+                await recorder.record(
+                    tool="devin",
+                    event_type="session_created",
+                    detail=f"Creating Devin session for {alert.rule_id} in {alert.file_path}",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "severity": alert.severity,
+                        "file_path": alert.file_path,
+                        "start_line": alert.start_line,
+                        "end_line": alert.end_line,
+                        "rule_description": alert.rule_description,
+                        "message": alert.message,
+                    },
+                )
+
                 result = await devin.create_remediation_session(alert, settings.github_repo, branch)
                 session_id = result.get("session_id", "")
 
@@ -95,16 +133,47 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
                         )
                     )
 
+                await recorder.record(
+                    tool="devin",
+                    event_type="analyzing",
+                    detail=f"Devin session {session_id} started for alert #{alert.number} ({alert.rule_id})",
+                    alert_number=alert.number,
+                    metadata={
+                        "session_id": session_id,
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                    },
+                )
+
                 logger.info(
                     "Created Devin session %s for alert %d (%s)",
                     session_id,
                     alert.number,
                     alert.rule_id,
                 )
-            except Exception:
+            except Exception as e:
                 logger.exception("Failed to create Devin session for alert %d", alert.number)
+                await recorder.record(
+                    tool="devin",
+                    event_type="error",
+                    detail=f"Failed to create session for alert #{alert.number}: {str(e)[:200]}",
+                    alert_number=alert.number,
+                    metadata={"error": str(e)[:500], "rule_id": alert.rule_id},
+                )
 
         await db.commit()
+
+        # Record completion
+        await recorder.record(
+            tool="devin",
+            event_type="remediation_complete",
+            detail=f"Created {len(sessions_created)} Devin sessions for {len(alerts)} alerts",
+            metadata={
+                "sessions_created": len(sessions_created),
+                "total_alerts": len(alerts),
+            },
+        )
+        await recorder.finish()
 
         return RemediationResponse(
             sessions_created=len(sessions_created),
@@ -188,6 +257,16 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             message="No matching open alerts found on this branch",
         )
 
+    # Start replay recording
+    recorder = ReplayRecorder(tools=[tool])
+    await recorder.start()
+    await recorder.record(
+        tool=tool,
+        event_type="scan_started",
+        detail=f"CodeQL scan detected {len(alerts)} open alerts on {branch}",
+        metadata={"branch": branch, "alert_count": len(alerts), "tool": tool},
+    )
+
     db = await get_db()
     jobs: list[ApiRemediationJob] = []
     completed = 0
@@ -204,6 +283,17 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             existing = await cursor.fetchone()
             if existing:
                 logger.info("Skipping alert %d for %s — already remediated", alert.number, tool)
+                await recorder.record(
+                    tool=tool,
+                    event_type="alert_skipped",
+                    detail=f"Alert #{alert.number} already remediated by {tool}",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                        "reason": "already_completed",
+                    },
+                )
                 skipped += 1
                 continue
 
@@ -218,6 +308,21 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
 
             try:
                 # 1. Fetch source file
+                await recorder.record(
+                    tool=tool,
+                    event_type="alert_triaged",
+                    detail=f"Fetching source file for alert #{alert.number}: {alert.file_path}",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "severity": alert.severity,
+                        "rule_description": alert.rule_description,
+                        "message": alert.message,
+                        "file_path": alert.file_path,
+                        "start_line": alert.start_line,
+                        "end_line": alert.end_line,
+                    },
+                )
                 file_content = await github.get_file_content(alert.file_path, branch)
 
                 # 2. Build prompt
@@ -232,20 +337,65 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                     file_content=file_content,
                 )
 
+                prompt_tokens = count_tokens(prompt)
+
                 # 3. Call LLM (with inter-call delay for rate limiting)
                 logger.info("Calling %s for alert %d (%s)", tool, alert.number, alert.rule_id)
-                fixed_content = await call_llm_with_delay(tool, prompt)
 
-                if not fixed_content or not fixed_content.strip():
+                await recorder.record(
+                    tool=tool,
+                    event_type="api_call_sent",
+                    detail=f"Sending alert context to {tool} for alert #{alert.number} ({alert.rule_id})",
+                    alert_number=alert.number,
+                    metadata={
+                        "prompt_tokens": prompt_tokens,
+                        "prompt_preview": prompt[:500],
+                        "source_file_length": len(file_content),
+                        "file_path": alert.file_path,
+                    },
+                )
+
+                llm_result = await call_llm_with_delay(tool, prompt)
+
+                if not llm_result.extracted_code or not llm_result.extracted_code.strip():
                     raise ValueError("LLM returned empty response")
+
+                await recorder.record(
+                    tool=tool,
+                    event_type="patch_generated",
+                    detail=f"{llm_result.model} generated fix for alert #{alert.number} ({alert.rule_id})",
+                    alert_number=alert.number,
+                    metadata={
+                        "model": llm_result.model,
+                        "latency_ms": llm_result.latency_ms,
+                        "input_tokens": llm_result.input_tokens,
+                        "output_tokens": llm_result.output_tokens,
+                        "fixed_content_length": len(llm_result.extracted_code),
+                        "source_file_length": len(file_content),
+                        "file_path": alert.file_path,
+                    },
+                )
 
                 # 4. Commit the fix to the tool's branch
                 commit_msg = f"fix: remediate CodeQL alert #{alert.number} ({alert.rule_id}) via {tool}"
                 commit_sha = await github.update_file_content(
                     path=alert.file_path,
-                    new_content=fixed_content,
+                    new_content=llm_result.extracted_code,
                     branch=branch,
                     commit_message=commit_msg,
+                )
+
+                await recorder.record(
+                    tool=tool,
+                    event_type="patch_applied",
+                    detail=f"Patch committed to {branch} for alert #{alert.number}",
+                    alert_number=alert.number,
+                    metadata={
+                        "commit_sha": commit_sha,
+                        "branch": branch,
+                        "file_path": alert.file_path,
+                        "commit_message": commit_msg,
+                    },
                 )
 
                 # 5. Update job status
@@ -274,6 +424,36 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                 )
                 await db.commit()
                 failed += 1
+
+                await recorder.record(
+                    tool=tool,
+                    event_type="error",
+                    detail=f"Failed to remediate alert #{alert.number}: {error_msg[:200]}",
+                    alert_number=alert.number,
+                    metadata={
+                        "error": error_msg,
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                    },
+                )
+
+        # Record completion summary
+        await recorder.record(
+            tool=tool,
+            event_type="remediation_complete",
+            detail=(
+                f"Remediation complete: {completed} fixed, {failed} failed, "
+                f"{skipped} skipped out of {len(alerts)} alerts"
+            ),
+            metadata={
+                "total_alerts": len(alerts),
+                "completed": completed,
+                "failed": failed,
+                "skipped": skipped,
+                "tool": tool,
+            },
+        )
+        await recorder.finish()
 
         # Fetch all jobs we created/touched for the response
         cursor = await db.execute(

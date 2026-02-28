@@ -144,6 +144,7 @@ export interface ReplayEvent {
   detail: string;
   alert_number: number | null;
   timestamp_offset_ms: number;
+  metadata: Record<string, unknown>;
   created_at: string;
 }
 

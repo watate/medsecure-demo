@@ -88,6 +88,7 @@ async def init_db() -> None:
                 detail TEXT NOT NULL DEFAULT '',
                 alert_number INTEGER,
                 timestamp_offset_ms INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -127,6 +128,13 @@ async def init_db() -> None:
         if "estimated_prompt_tokens" not in columns:
             await db.execute(
                 "ALTER TABLE scan_branches ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(replay_events)")
+        re_columns = {row[1] for row in await cursor.fetchall()}
+        if "metadata" not in re_columns:
+            await db.execute(
+                "ALTER TABLE replay_events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"
             )
 
         await db.commit()

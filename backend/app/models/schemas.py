@@ -226,6 +226,7 @@ class ReplayEvent(BaseModel):
     detail: str
     alert_number: int | None = None
     timestamp_offset_ms: int
+    metadata: dict[str, object] = {}
     created_at: str
 
 
