@@ -142,11 +142,8 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
             CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
-            CREATE INDEX IF NOT EXISTS idx_devin_sessions_repo_status ON devin_sessions(repo, status);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_session_alert
                 ON devin_sessions(session_id, alert_number);
-            CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_repo_tool ON api_remediation_jobs(repo, tool, status);
-            CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_repo_alert ON copilot_autofix_jobs(repo, alert_number);
             CREATE INDEX IF NOT EXISTS idx_replay_events_run ON replay_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
             CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_tool ON api_remediation_jobs(tool, status);
@@ -198,6 +195,20 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE copilot_autofix_jobs ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
             )
+
+        # Create repo-dependent indexes (must come after ALTER TABLE adds repo)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_devin_sessions_repo_status "
+            "ON devin_sessions(repo, status)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_repo_tool "
+            "ON api_remediation_jobs(repo, tool, status)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_repo_alert "
+            "ON copilot_autofix_jobs(repo, alert_number)"
+        )
 
         # Migrate devin_sessions: remove UNIQUE constraint on session_id
         # so grouped sessions (multiple alerts per session) can share one id.
