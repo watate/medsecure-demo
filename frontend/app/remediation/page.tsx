@@ -580,26 +580,38 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
           <div ref={logContainerRef} className="max-h-96 overflow-y-auto space-y-1">
             {visibleEvents.map((event) => {
               const meta = event.metadata || {};
+              const rawResponse = meta.raw_response as string | Record<string, unknown> | undefined;
               return (
-                <div
-                  key={event.id}
-                  className="flex items-start gap-3 py-1.5 text-sm"
-                >
-                  <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
-                    +{formatDuration(event.timestamp_offset_ms)}
-                  </span>
-                  <span className={`font-medium w-20 shrink-0 text-xs ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
-                    {TOOL_LABELS[event.tool] || event.tool}
-                  </span>
-                  <span className="w-4">{EVENT_ICONS[event.event_type] || "\u2022"}</span>
-                  <div className="flex-1 min-w-0">
-                    <span className="text-muted-foreground">{event.detail}</span>
-                    <MetadataBadges metadata={meta} />
-                  </div>
-                  {event.cost_usd > 0 && (
-                    <span className="text-xs font-mono text-amber-600 shrink-0">
-                      ${event.cost_usd.toFixed(4)}
+                <div key={event.id} className="py-1.5 text-sm">
+                  <div className="flex items-start gap-3">
+                    <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
+                      +{formatDuration(event.timestamp_offset_ms)}
                     </span>
+                    <span className={`font-medium w-20 shrink-0 text-xs ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
+                      {TOOL_LABELS[event.tool] || event.tool}
+                    </span>
+                    <span className="w-4">{EVENT_ICONS[event.event_type] || "\u2022"}</span>
+                    <div className="flex-1 min-w-0">
+                      <span className="text-muted-foreground">{event.detail}</span>
+                      <MetadataBadges metadata={meta} />
+                    </div>
+                    {event.cost_usd > 0 && (
+                      <span className="text-xs font-mono text-amber-600 shrink-0">
+                        ${event.cost_usd.toFixed(4)}
+                      </span>
+                    )}
+                  </div>
+                  {rawResponse && (
+                    <details className="ml-[9.5rem] mt-1">
+                      <summary className="text-[10px] text-blue-600 cursor-pointer hover:underline select-none">
+                        View raw response
+                      </summary>
+                      <pre className="mt-1 p-2 rounded bg-muted text-[11px] overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+                        {typeof rawResponse === "string"
+                          ? rawResponse
+                          : JSON.stringify(rawResponse, null, 2)}
+                      </pre>
+                    </details>
                   )}
                 </div>
               );

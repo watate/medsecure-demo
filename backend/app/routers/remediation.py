@@ -990,10 +990,11 @@ async def trigger_copilot_remediation(
                                 "description": description,
                                 "rule_id": alert.rule_id,
                                 "file_path": alert.file_path,
+                                "raw_response": autofix,
                             },
                         )
 
-                        if autofix_status != "succeeded":
+                        if autofix_status not in ("succeeded", "success"):
                             # Autofix didn't succeed — mark as failed
                             await db.execute(
                                 """UPDATE copilot_autofix_jobs
@@ -1028,6 +1029,7 @@ async def trigger_copilot_remediation(
                                 "branch": branch_name,
                                 "file_path": alert.file_path,
                                 "description": description,
+                                "raw_response": autofix,
                             },
                         )
 
@@ -1321,6 +1323,7 @@ async def _benchmark_api_tool(
                         "input_tokens": llm_result.input_tokens,
                         "output_tokens": llm_result.output_tokens,
                         "file_path": file_path,
+                        "raw_response": llm_result.raw_response_text[:5000],
                     },
                     cost_usd=call_cost,
                 )
@@ -1633,6 +1636,7 @@ async def _benchmark_devin(
                                 "status": effective_status,
                                 "file_path": file_path,
                                 "acus_consumed": acus,
+                                "raw_response": status_data,
                             },
                             cost_usd=cost,
                         )
@@ -1808,7 +1812,7 @@ async def _benchmark_copilot(
                 autofix = await github.poll_autofix(alert.number)
                 autofix_status = autofix.get("status", "unknown")
 
-                if autofix_status == "succeeded":
+                if autofix_status in ("succeeded", "success"):
                     commit_msg = (
                         f"fix: Copilot Autofix for alert #{alert.number} "
                         f"({alert.rule_id}) in {alert.file_path}"
@@ -1827,6 +1831,7 @@ async def _benchmark_copilot(
                             "commit_sha": commit_sha,
                             "branch": branch_name,
                             "file_path": alert.file_path,
+                            "raw_response": autofix,
                         },
                     )
                     completed += 1
@@ -1836,7 +1841,10 @@ async def _benchmark_copilot(
                         event_type="autofix_result",
                         detail=f"Autofix for alert #{alert.number}: {autofix_status}",
                         alert_number=alert.number,
-                        metadata={"autofix_status": autofix_status},
+                        metadata={
+                            "autofix_status": autofix_status,
+                            "raw_response": autofix,
+                        },
                     )
                     failed += 1
 
