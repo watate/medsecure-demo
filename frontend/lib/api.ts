@@ -335,8 +335,8 @@ export const api = {
   // Replay
   listReplayRuns: (repo?: string | null) =>
     fetchApi<ReplayRun[]>(`/api/replay/runs${qs({ repo })}`),
-  getReplayRun: (runId: number) =>
-    fetchApi<ReplayRunWithEvents>(`/api/replay/runs/${runId}`),
+  getReplayRun: (runId: number, repo?: string | null) =>
+    fetchApi<ReplayRunWithEvents>(`/api/replay/runs/${runId}${qs({ repo })}`),
   seedDemoReplay: (repo?: string | null) =>
     fetchApi<{ run_id: number; events_created: number; message: string }>(
       `/api/replay/demo-seed${qs({ repo })}`,

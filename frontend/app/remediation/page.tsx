@@ -615,7 +615,7 @@ export default function RemediationPage() {
 
     const poll = async () => {
       try {
-        const data = await api.getReplayRun(runId);
+        const data = await api.getReplayRun(runId, selectedRepo);
         setLiveRun(data);
         if (data.status === "completed" || data.status === "failed") {
           setBenchmarkRunning(false);
@@ -641,7 +641,7 @@ export default function RemediationPage() {
         pollRef.current = null;
       }
     };
-  }, [runId]);
+  }, [runId, selectedRepo]);
 
   // Toggle severity checkbox
   const toggleSeverity = (severity: string) => {

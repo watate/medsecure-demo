@@ -441,7 +441,7 @@ export default function ReplayPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getReplayRun(runId);
+      const data = await api.getReplayRun(runId, selectedRepo);
       setSelectedRun(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load replay");
