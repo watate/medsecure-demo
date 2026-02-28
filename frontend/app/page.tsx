@@ -230,10 +230,17 @@ export default function DashboardPage() {
                             </span>
                           </div>
                           {est.pricing_type === "token" && (
-                            <p className="text-xs text-muted-foreground mt-1">
-                              {est.model} &middot;{" "}
-                              {est.estimated_input_tokens.toLocaleString()} tokens
-                            </p>
+                            <>
+                              <p className="text-xs text-muted-foreground mt-1">
+                                {est.model}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                ~{est.estimated_input_tokens.toLocaleString()} input tokens
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                ~{est.estimated_output_tokens.toLocaleString()} output tokens <span className="italic">(est.)</span>
+                              </p>
+                            </>
                           )}
                           {est.pricing_type === "per_request" && (
                             <p className="text-xs text-muted-foreground mt-1">

@@ -12,6 +12,8 @@ export interface BranchSummary {
   medium: number;
   low: number;
   other: number;
+  estimated_prompt_tokens: number;
+  unique_file_count: number;
 }
 
 export interface ScanSnapshot {

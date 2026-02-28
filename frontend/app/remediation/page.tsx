@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import {
   api,
   type Alert,
-  type ComparisonResult,
+  type CostEstimate,
   type ReplayRunWithEvents,
   type ReplayEvent,
 } from "@/lib/api";
@@ -79,6 +79,119 @@ const SEVERITY_CONFIG = [
 ];
 
 const POLL_INTERVAL_MS = 3000;
+
+// ---------------------------------------------------------------------------
+// Pricing constants (mirrored from backend)
+// ---------------------------------------------------------------------------
+const DEVIN_ACU_PER_SESSION = 0.09;
+const DEVIN_COST_PER_ACU = 2.0;
+const COPILOT_COST_PER_REQUEST = 0.04;
+const ESTIMATED_TOKENS_PER_ALERT = 4500; // fallback when no baseline token data
+
+const API_TOOL_PRICING: Record<string, { model: string; inputPerMtok: number; outputPerMtok: number }> = {
+  anthropic: { model: "claude-opus-4-6", inputPerMtok: 5.0, outputPerMtok: 25.0 },
+  openai: { model: "gpt-5.3-codex", inputPerMtok: 1.75, outputPerMtok: 14.0 },
+  gemini: { model: "gemini-3.1-pro-preview", inputPerMtok: 2.0, outputPerMtok: 12.0 },
+};
+
+/**
+ * Compute cost estimates client-side for the given filtered alerts.
+ * This reacts to severity selection changes without a backend round-trip.
+ */
+function computeFilteredCostEstimates(
+  filteredAlerts: Alert[],
+  baselineEstimatedTokens: number,
+  baselineTotalAlerts: number,
+): Record<string, CostEstimate> {
+  const alertCount = filteredAlerts.length;
+  if (alertCount === 0) return {};
+
+  const uniqueFiles = new Set(filteredAlerts.map((a) => a.file_path));
+  const fileCount = uniqueFiles.size;
+
+  // Scale baseline token estimate proportionally to filtered alert count.
+  // If no baseline estimate, fall back to per-alert heuristic.
+  let estimatedInputTokens: number;
+  if (baselineEstimatedTokens > 0 && baselineTotalAlerts > 0) {
+    estimatedInputTokens = Math.round(
+      (baselineEstimatedTokens / baselineTotalAlerts) * alertCount
+    );
+  } else {
+    estimatedInputTokens = alertCount * ESTIMATED_TOKENS_PER_ALERT;
+  }
+  // Output tokens estimated as ~equal to input tokens
+  const estimatedOutputTokens = estimatedInputTokens;
+
+  const estimates: Record<string, CostEstimate> = {};
+
+  // Devin: ACU-based, 1 session per unique file
+  const sessionCount = fileCount > 0 ? fileCount : alertCount;
+  const estimatedAcus = sessionCount * DEVIN_ACU_PER_SESSION;
+  const devinCost = estimatedAcus * DEVIN_COST_PER_ACU;
+  estimates.devin = {
+    model: "Devin (ACU-based)",
+    pricing_type: "acu",
+    total_cost_usd: parseFloat(devinCost.toFixed(4)),
+    alerts_processed: alertCount,
+    estimated_acus: parseFloat(estimatedAcus.toFixed(2)),
+    cost_per_acu_usd: DEVIN_COST_PER_ACU,
+    assumption:
+      fileCount > 0
+        ? `Assumes ~${DEVIN_ACU_PER_SESSION} ACU per session, ${sessionCount} sessions (${alertCount} alerts grouped into ${fileCount} files)`
+        : `Assumes ~${DEVIN_ACU_PER_SESSION} ACU per session (1 session per unique file)`,
+    estimated_input_tokens: 0,
+    estimated_output_tokens: 0,
+    input_cost_usd: 0,
+    output_cost_usd: 0,
+    pricing: {},
+    cost_per_request_usd: 0,
+  };
+
+  // Copilot: flat $0.04 per alert
+  const copilotCost = alertCount * COPILOT_COST_PER_REQUEST;
+  estimates.copilot = {
+    model: "Copilot Autofix",
+    pricing_type: "per_request",
+    total_cost_usd: parseFloat(copilotCost.toFixed(4)),
+    alerts_processed: alertCount,
+    cost_per_request_usd: COPILOT_COST_PER_REQUEST,
+    assumption: null,
+    estimated_input_tokens: 0,
+    estimated_output_tokens: 0,
+    input_cost_usd: 0,
+    output_cost_usd: 0,
+    pricing: {},
+    estimated_acus: 0,
+    cost_per_acu_usd: 0,
+  };
+
+  // API tools: token-based pricing
+  for (const [tool, pricing] of Object.entries(API_TOOL_PRICING)) {
+    const inputCost = (estimatedInputTokens / 1_000_000) * pricing.inputPerMtok;
+    const outputCost = (estimatedOutputTokens / 1_000_000) * pricing.outputPerMtok;
+    const totalCost = inputCost + outputCost;
+    estimates[tool] = {
+      model: pricing.model,
+      pricing_type: "token",
+      total_cost_usd: parseFloat(totalCost.toFixed(4)),
+      estimated_input_tokens: estimatedInputTokens,
+      estimated_output_tokens: estimatedOutputTokens,
+      input_cost_usd: parseFloat(inputCost.toFixed(4)),
+      output_cost_usd: parseFloat(outputCost.toFixed(4)),
+      pricing: {
+        input_per_mtok_usd: pricing.inputPerMtok,
+        output_per_mtok_usd: pricing.outputPerMtok,
+      },
+      alerts_processed: alertCount,
+      assumption: null,
+      cost_per_request_usd: 0,
+      estimated_acus: 0,
+      cost_per_acu_usd: 0,
+    };
+  }
+
+  return estimates;
+}
 
 // ---------------------------------------------------------------------------
 // Helper components
@@ -422,7 +535,7 @@ export default function RemediationPage() {
   const [selectedSeverities, setSelectedSeverities] = useState<Set<string>>(
     new Set(["critical", "high", "medium", "low"])
   );
-  const [costEstimates, setCostEstimates] = useState<ComparisonResult["cost_estimates"]>(null);
+  const [baselineTokenData, setBaselineTokenData] = useState<{ tokens: number; totalAlerts: number }>({ tokens: 0, totalAlerts: 0 });
   const [error, setError] = useState<string | null>(null);
 
   // Benchmark state
@@ -439,16 +552,25 @@ export default function RemediationPage() {
     severityCounts[sev] = (severityCounts[sev] || 0) + 1;
   }
 
-  // Filtered alert count
-  const filteredAlertCount = baselineAlerts.filter((a) =>
+  // Filtered alerts (used for cost estimation, file count, and alert count)
+  const filteredAlerts = baselineAlerts.filter((a) =>
     selectedSeverities.has(a.severity.toLowerCase())
-  ).length;
+  );
+  const filteredAlertCount = filteredAlerts.length;
 
   // Unique file count for filtered alerts
-  const filteredFiles = new Set(
-    baselineAlerts
-      .filter((a) => selectedSeverities.has(a.severity.toLowerCase()))
-      .map((a) => a.file_path)
+  const filteredFiles = new Set(filteredAlerts.map((a) => a.file_path));
+
+  // Client-side cost estimates — recomputed whenever severity selection changes
+  const costEstimates = useMemo(
+    () =>
+      computeFilteredCostEstimates(
+        filteredAlerts,
+        baselineTokenData.tokens,
+        baselineTokenData.totalAlerts,
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredAlerts.length, filteredFiles.size, baselineTokenData.tokens, baselineTokenData.totalAlerts],
   );
 
   // Load baseline alerts
@@ -466,21 +588,26 @@ export default function RemediationPage() {
     }
   }, [selectedRepo]);
 
-  // Load cost estimates
-  const loadCostEstimates = useCallback(async () => {
+  // Load baseline token estimate (for scaling API cost estimates)
+  const loadBaselineTokenData = useCallback(async () => {
     try {
       const data = await api.compareLatest(selectedRepo);
-      setCostEstimates(data.cost_estimates);
+      if (data.baseline) {
+        setBaselineTokenData({
+          tokens: data.baseline.estimated_prompt_tokens ?? 0,
+          totalAlerts: data.baseline.open ?? 0,
+        });
+      }
     } catch {
-      // Not critical
+      // Not critical — falls back to per-alert heuristic
     }
   }, [selectedRepo]);
 
   useEffect(() => {
     if (!selectedRepo) return;
     loadBaselineAlerts();
-    loadCostEstimates();
-  }, [selectedRepo, loadBaselineAlerts, loadCostEstimates]);
+    loadBaselineTokenData();
+  }, [selectedRepo, loadBaselineAlerts, loadBaselineTokenData]);
 
   // Poll for live run updates
   useEffect(() => {
@@ -679,7 +806,7 @@ export default function RemediationPage() {
             <CardContent>
               <div className="grid gap-3 md:grid-cols-5">
                 {["devin", "copilot", "anthropic", "openai", "gemini"].map((tool) => {
-                  const estimate = costEstimates?.[tool];
+                  const estimate = costEstimates[tool];
                   return (
                     <div
                       key={tool}
@@ -704,9 +831,14 @@ export default function RemediationPage() {
                             </p>
                           )}
                           {estimate.pricing_type === "token" && (
-                            <p className="text-[10px] text-muted-foreground">
-                              ~{estimate.estimated_input_tokens.toLocaleString()} input tokens
-                            </p>
+                            <>
+                              <p className="text-[10px] text-muted-foreground">
+                                ~{estimate.estimated_input_tokens.toLocaleString()} input tokens
+                              </p>
+                              <p className="text-[10px] text-muted-foreground">
+                                ~{estimate.estimated_output_tokens.toLocaleString()} output tokens <span className="italic">(est.)</span>
+                              </p>
+                            </>
                           )}
                           {estimate.assumption && (
                             <p className="text-[10px] text-muted-foreground italic">
