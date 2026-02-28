@@ -124,6 +124,7 @@ async def list_runs() -> list[ReplayRun]:
                 ended_at=row["ended_at"],
                 status=row["status"],
                 tools=json.loads(row["tools"]),
+                branch_name=row["branch_name"] if "branch_name" in row.keys() else None,
             )
             for row in rows
         ]
@@ -172,6 +173,7 @@ async def get_run(run_id: int) -> ReplayRunWithEvents:
             ended_at=run["ended_at"],
             status=run["status"],
             tools=json.loads(run["tools"]),
+            branch_name=run["branch_name"] if "branch_name" in run.keys() else None,
             events=events,
             total_duration_ms=total_duration_ms,
         )

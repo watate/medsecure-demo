@@ -238,6 +238,7 @@ class ReplayRun(BaseModel):
     ended_at: str | None = None
     status: str
     tools: list[str]
+    branch_name: str | None = None
 
 
 class ReplayRunWithEvents(ReplayRun):

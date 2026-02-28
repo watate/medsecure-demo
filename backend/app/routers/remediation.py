@@ -1,9 +1,11 @@
 import logging
+from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
 from app.models.schemas import (
+    Alert,
     ApiRemediationJob,
     ApiRemediationRequest,
     ApiRemediationResponse,
@@ -16,7 +18,11 @@ from app.services.devin_client import DevinClient
 from app.services.github_client import GitHubClient
 from app.services.llm_client import call_llm_with_delay
 from app.services.replay_recorder import ReplayRecorder
-from app.services.token_counter import build_prompt_for_alert, count_tokens
+from app.services.token_counter import (
+    build_grouped_prompt_for_file,
+    build_prompt_for_alert,
+    count_tokens,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/remediate", tags=["remediation"])
@@ -29,18 +35,30 @@ _API_TOOL_CONFIG = {
 }
 
 
+def _group_alerts_by_file(alerts: list[Alert]) -> dict[str, list[Alert]]:
+    """Group alerts by file_path so multiple alerts in the same file
+    can be processed together, avoiding conflicts."""
+    groups: dict[str, list[Alert]] = defaultdict(list)
+    for alert in alerts:
+        groups[alert.file_path].append(alert)
+    return dict(groups)
+
+
 @router.post("/devin", response_model=RemediationResponse)
 async def trigger_devin_remediation(request: RemediationRequest) -> RemediationResponse:
-    """Create Devin sessions to fix CodeQL alerts on the devin branch."""
+    """Create Devin sessions to fix CodeQL alerts.
+
+    Creates a fresh branch from main via GitHub API, groups alerts by file,
+    and creates one Devin session per file with all grouped alerts as context.
+    """
     if not settings.devin_api_key:
         raise HTTPException(status_code=400, detail="DEVIN_API_KEY not configured")
 
     github = GitHubClient()
     devin = DevinClient()
-    branch = settings.branch_devin
 
-    # Get open alerts
-    alerts = await github.get_alerts(branch, state="open")
+    # Get open alerts from baseline (main) branch
+    alerts = await github.get_alerts(settings.branch_baseline, state="open")
 
     if request.alert_numbers:
         alerts = [a for a in alerts if a.number in request.alert_numbers]
@@ -51,70 +69,114 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
     # Limit batch size
     alerts = alerts[: request.batch_size]
 
-    # Start replay recording
-    recorder = ReplayRecorder(tools=["devin"])
+    # Create a fresh branch from main for this remediation run
+    branch_name = f"remediate/devin-{int(__import__('time').time())}"
+    try:
+        await github.create_branch(branch_name, from_branch=settings.branch_baseline)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create branch {branch_name}: {e}",
+        ) from e
+
+    # Start replay recording with the new branch name
+    recorder = ReplayRecorder(tools=["devin"], branch_name=branch_name)
     await recorder.start()
+
+    # Group alerts by file to avoid conflicts
+    file_groups = _group_alerts_by_file(alerts)
+
     await recorder.record(
         tool="devin",
         event_type="scan_started",
-        detail=f"CodeQL scan detected {len(alerts)} open alerts on {branch}",
-        metadata={"branch": branch, "alert_count": len(alerts)},
+        detail=f"CodeQL scan detected {len(alerts)} open alerts across {len(file_groups)} files",
+        metadata={
+            "branch": branch_name,
+            "source_branch": settings.branch_baseline,
+            "alert_count": len(alerts),
+            "file_count": len(file_groups),
+            "grouped_files": list(file_groups.keys()),
+        },
     )
 
     db = await get_db()
     sessions_created: list[DevinSession] = []
 
     try:
-        for alert in alerts:
-            # Check if we already have a session for this alert
-            cursor = await db.execute(
-                "SELECT * FROM devin_sessions WHERE alert_number = ? AND status NOT IN ('failed', 'stopped')",
-                (alert.number,),
-            )
-            existing = await cursor.fetchone()
-            if existing:
-                logger.info("Skipping alert %d, already has session %s", alert.number, existing["session_id"])
-                await recorder.record(
-                    tool="devin",
-                    event_type="alert_skipped",
-                    detail=f"Alert #{alert.number} already has active session {existing['session_id']}",
-                    alert_number=alert.number,
-                    metadata={
-                        "rule_id": alert.rule_id,
-                        "file_path": alert.file_path,
-                        "existing_session_id": existing["session_id"],
-                    },
+        for file_path, file_alerts in file_groups.items():
+            alert_nums = [a.number for a in file_alerts]
+
+            # Check if we already have sessions for any of these alerts
+            skipped_alerts: list[Alert] = []
+            new_alerts: list[Alert] = []
+            for alert in file_alerts:
+                cursor = await db.execute(
+                    "SELECT * FROM devin_sessions WHERE alert_number = ? AND status NOT IN ('failed', 'stopped')",
+                    (alert.number,),
                 )
+                existing = await cursor.fetchone()
+                if existing:
+                    logger.info("Skipping alert %d, already has session %s", alert.number, existing["session_id"])
+                    await recorder.record(
+                        tool="devin",
+                        event_type="alert_skipped",
+                        detail=f"Alert #{alert.number} already has active session {existing['session_id']}",
+                        alert_number=alert.number,
+                        metadata={
+                            "rule_id": alert.rule_id,
+                            "file_path": alert.file_path,
+                            "existing_session_id": existing["session_id"],
+                        },
+                    )
+                    skipped_alerts.append(alert)
+                else:
+                    new_alerts.append(alert)
+
+            if not new_alerts:
                 continue
 
             try:
                 await recorder.record(
                     tool="devin",
                     event_type="session_created",
-                    detail=f"Creating Devin session for {alert.rule_id} in {alert.file_path}",
-                    alert_number=alert.number,
+                    detail=(
+                        f"Creating Devin session for {len(new_alerts)} alert(s) in {file_path}"
+                    ),
+                    alert_number=new_alerts[0].number,
                     metadata={
-                        "rule_id": alert.rule_id,
-                        "severity": alert.severity,
-                        "file_path": alert.file_path,
-                        "start_line": alert.start_line,
-                        "end_line": alert.end_line,
-                        "rule_description": alert.rule_description,
-                        "message": alert.message,
+                        "file_path": file_path,
+                        "alert_count": len(new_alerts),
+                        "alert_numbers": [a.number for a in new_alerts],
+                        "rules": [a.rule_id for a in new_alerts],
+                        "severities": [a.severity for a in new_alerts],
+                        "branch": branch_name,
                     },
                 )
 
-                result = await devin.create_remediation_session(alert, settings.github_repo, branch)
+                # Use grouped session if multiple alerts, single otherwise
+                if len(new_alerts) == 1:
+                    result = await devin.create_remediation_session(
+                        new_alerts[0], settings.github_repo, branch_name,
+                    )
+                else:
+                    result = await devin.create_grouped_session(
+                        new_alerts, settings.github_repo, branch_name,
+                    )
                 session_id = result.get("session_id", "")
 
-                await db.execute(
-                    """INSERT INTO devin_sessions (session_id, alert_number, rule_id, file_path, status)
-                       VALUES (?, ?, ?, ?, 'running')""",
-                    (session_id, alert.number, alert.rule_id, alert.file_path),
-                )
+                # Record a devin_sessions row per alert (all share same session_id)
+                for alert in new_alerts:
+                    await db.execute(
+                        """INSERT INTO devin_sessions (session_id, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, 'running')""",
+                        (session_id, alert.number, alert.rule_id, alert.file_path),
+                    )
+                # Commit after INSERTs to release SQLite write lock so
+                # ReplayRecorder (which uses its own connection) can write.
+                await db.commit()
 
                 cursor = await db.execute(
-                    "SELECT * FROM devin_sessions WHERE session_id = ?",
+                    "SELECT * FROM devin_sessions WHERE session_id = ? LIMIT 1",
                     (session_id,),
                 )
                 row = await cursor.fetchone()
@@ -136,29 +198,37 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
                 await recorder.record(
                     tool="devin",
                     event_type="analyzing",
-                    detail=f"Devin session {session_id} started for alert #{alert.number} ({alert.rule_id})",
-                    alert_number=alert.number,
+                    detail=(
+                        f"Devin session {session_id} started for "
+                        f"{len(new_alerts)} alert(s) in {file_path}"
+                    ),
+                    alert_number=new_alerts[0].number,
                     metadata={
                         "session_id": session_id,
-                        "rule_id": alert.rule_id,
-                        "file_path": alert.file_path,
+                        "file_path": file_path,
+                        "alert_numbers": [a.number for a in new_alerts],
+                        "branch": branch_name,
                     },
                 )
 
                 logger.info(
-                    "Created Devin session %s for alert %d (%s)",
+                    "Created Devin session %s for %d alerts in %s",
                     session_id,
-                    alert.number,
-                    alert.rule_id,
+                    len(new_alerts),
+                    file_path,
                 )
             except Exception as e:
-                logger.exception("Failed to create Devin session for alert %d", alert.number)
+                logger.exception("Failed to create Devin session for file %s", file_path)
                 await recorder.record(
                     tool="devin",
                     event_type="error",
-                    detail=f"Failed to create session for alert #{alert.number}: {str(e)[:200]}",
-                    alert_number=alert.number,
-                    metadata={"error": str(e)[:500], "rule_id": alert.rule_id},
+                    detail=f"Failed to create session for {file_path} (alerts {alert_nums}): {str(e)[:200]}",
+                    alert_number=new_alerts[0].number,
+                    metadata={
+                        "error": str(e)[:500],
+                        "file_path": file_path,
+                        "alert_numbers": alert_nums,
+                    },
                 )
 
         await db.commit()
@@ -167,10 +237,15 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
         await recorder.record(
             tool="devin",
             event_type="remediation_complete",
-            detail=f"Created {len(sessions_created)} Devin sessions for {len(alerts)} alerts",
+            detail=(
+                f"Created {len(sessions_created)} Devin session(s) for "
+                f"{len(alerts)} alerts across {len(file_groups)} files on {branch_name}"
+            ),
             metadata={
                 "sessions_created": len(sessions_created),
                 "total_alerts": len(alerts),
+                "file_groups": len(file_groups),
+                "branch": branch_name,
             },
         )
         await recorder.finish()
@@ -178,7 +253,10 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
         return RemediationResponse(
             sessions_created=len(sessions_created),
             sessions=sessions_created,
-            message=f"Created {len(sessions_created)} Devin sessions for {len(alerts)} alerts",
+            message=(
+                f"Created {len(sessions_created)} Devin session(s) for "
+                f"{len(alerts)} alerts on branch {branch_name}"
+            ),
         )
     except Exception:
         await recorder.finish("failed")
@@ -217,11 +295,11 @@ async def list_devin_sessions() -> list[DevinSession]:
 async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediationResponse:
     """Trigger remediation using an API-based tool (Anthropic, OpenAI, or Google).
 
-    For each selected alert:
-    1. Fetch the source file from the tool's branch
-    2. Build a remediation prompt (alert context + full source file)
-    3. Call the LLM API to generate a fix
-    4. Commit the fixed file back to the tool's branch via GitHub Contents API
+    Creates a fresh branch from main, groups alerts by file, and for each file:
+    1. Fetch the source file from the new branch
+    2. Build a single remediation prompt with all alerts for that file
+    3. Call the LLM API to generate a fix addressing all alerts at once
+    4. Commit the fixed file back via GitHub Contents API (one commit per file)
     """
     tool = request.tool
     if tool not in _API_TOOL_CONFIG:
@@ -230,8 +308,7 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             detail=f"Unknown API tool: {tool}. Must be one of: {list(_API_TOOL_CONFIG.keys())}",
         )
 
-    branch_attr, key_attr = _API_TOOL_CONFIG[tool]
-    branch = getattr(settings, branch_attr)
+    _branch_attr, key_attr = _API_TOOL_CONFIG[tool]
     api_key = getattr(settings, key_attr)
 
     if not api_key:
@@ -242,8 +319,8 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
 
     github = GitHubClient()
 
-    # Fetch open alerts on the tool's branch
-    alerts = await github.get_alerts(branch, state="open")
+    # Fetch open alerts from baseline (main) branch
+    alerts = await github.get_alerts(settings.branch_baseline, state="open")
 
     # Filter to requested alert numbers
     requested_set = set(request.alert_numbers)
@@ -257,17 +334,40 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             failed=0,
             skipped=0,
             jobs=[],
-            message="No matching open alerts found on this branch",
+            message="No matching open alerts found",
         )
 
-    # Start replay recording
-    recorder = ReplayRecorder(tools=[tool])
+    # Create a fresh branch from main for this remediation run
+    branch_name = f"remediate/{tool}-{int(__import__('time').time())}"
+    try:
+        await github.create_branch(branch_name, from_branch=settings.branch_baseline)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create branch {branch_name}: {e}",
+        ) from e
+
+    # Group alerts by file to avoid conflicts
+    file_groups = _group_alerts_by_file(alerts)
+
+    # Start replay recording with the new branch
+    recorder = ReplayRecorder(tools=[tool], branch_name=branch_name)
     await recorder.start()
     await recorder.record(
         tool=tool,
         event_type="scan_started",
-        detail=f"CodeQL scan detected {len(alerts)} open alerts on {branch}",
-        metadata={"branch": branch, "alert_count": len(alerts), "tool": tool},
+        detail=(
+            f"Starting {tool} remediation for {len(alerts)} alerts "
+            f"across {len(file_groups)} files on {branch_name}"
+        ),
+        metadata={
+            "branch": branch_name,
+            "source_branch": settings.branch_baseline,
+            "alert_count": len(alerts),
+            "file_count": len(file_groups),
+            "grouped_files": list(file_groups.keys()),
+            "tool": tool,
+        },
     )
 
     db = await get_db()
@@ -277,36 +377,46 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
     skipped = 0
 
     try:
-        for alert in alerts:
-            # Skip if we already have a successful job for this alert+tool
-            cursor = await db.execute(
-                "SELECT * FROM api_remediation_jobs WHERE tool = ? AND alert_number = ? AND status = 'completed'",
-                (tool, alert.number),
-            )
-            existing = await cursor.fetchone()
-            if existing:
-                logger.info("Skipping alert %d for %s — already remediated", alert.number, tool)
-                await recorder.record(
-                    tool=tool,
-                    event_type="alert_skipped",
-                    detail=f"Alert #{alert.number} already remediated by {tool}",
-                    alert_number=alert.number,
-                    metadata={
-                        "rule_id": alert.rule_id,
-                        "file_path": alert.file_path,
-                        "reason": "already_completed",
-                    },
+        for file_path, file_alerts in file_groups.items():
+            alert_nums = [a.number for a in file_alerts]
+
+            # Skip alerts that already have a successful job
+            new_alerts: list[Alert] = []
+            for alert in file_alerts:
+                cursor = await db.execute(
+                    "SELECT * FROM api_remediation_jobs WHERE tool = ? AND alert_number = ? AND status = 'completed'",
+                    (tool, alert.number),
                 )
-                skipped += 1
+                existing = await cursor.fetchone()
+                if existing:
+                    logger.info("Skipping alert %d for %s — already remediated", alert.number, tool)
+                    await recorder.record(
+                        tool=tool,
+                        event_type="alert_skipped",
+                        detail=f"Alert #{alert.number} already remediated by {tool}",
+                        alert_number=alert.number,
+                        metadata={
+                            "rule_id": alert.rule_id,
+                            "file_path": alert.file_path,
+                            "reason": "already_completed",
+                        },
+                    )
+                    skipped += 1
+                else:
+                    new_alerts.append(alert)
+
+            if not new_alerts:
                 continue
 
-            # Insert a pending job row
-            cursor = await db.execute(
-                """INSERT INTO api_remediation_jobs (tool, alert_number, rule_id, file_path, status)
-                   VALUES (?, ?, ?, ?, 'running')""",
-                (tool, alert.number, alert.rule_id, alert.file_path),
-            )
-            job_id = cursor.lastrowid
+            # Insert pending job rows for all alerts in this file group
+            job_ids: list[int] = []
+            for alert in new_alerts:
+                cursor = await db.execute(
+                    """INSERT INTO api_remediation_jobs (tool, alert_number, rule_id, file_path, status)
+                       VALUES (?, ?, ?, ?, 'running')""",
+                    (tool, alert.number, alert.rule_id, alert.file_path),
+                )
+                job_ids.append(cursor.lastrowid or 0)
             await db.commit()
 
             try:
@@ -314,47 +424,74 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                 await recorder.record(
                     tool=tool,
                     event_type="alert_triaged",
-                    detail=f"Fetching source file for alert #{alert.number}: {alert.file_path}",
-                    alert_number=alert.number,
+                    detail=(
+                        f"Fetching {file_path} for {len(new_alerts)} alert(s): "
+                        f"{', '.join(f'#{a.number}' for a in new_alerts)}"
+                    ),
+                    alert_number=new_alerts[0].number,
                     metadata={
-                        "rule_id": alert.rule_id,
-                        "severity": alert.severity,
-                        "rule_description": alert.rule_description,
-                        "message": alert.message,
-                        "file_path": alert.file_path,
-                        "start_line": alert.start_line,
-                        "end_line": alert.end_line,
+                        "file_path": file_path,
+                        "alert_count": len(new_alerts),
+                        "alert_numbers": [a.number for a in new_alerts],
+                        "rules": [a.rule_id for a in new_alerts],
+                        "severities": [a.severity for a in new_alerts],
                     },
                 )
-                file_content = await github.get_file_content(alert.file_path, branch)
+                file_content = await github.get_file_content(file_path, branch_name)
 
-                # 2. Build prompt
-                prompt = build_prompt_for_alert(
-                    alert_rule_id=alert.rule_id,
-                    alert_severity=alert.severity,
-                    alert_rule_description=alert.rule_description,
-                    alert_message=alert.message,
-                    alert_file_path=alert.file_path,
-                    alert_start_line=alert.start_line,
-                    alert_end_line=alert.end_line,
-                    file_content=file_content,
-                )
+                # 2. Build prompt — grouped if multiple alerts, single otherwise
+                if len(new_alerts) == 1:
+                    alert = new_alerts[0]
+                    prompt = build_prompt_for_alert(
+                        alert_rule_id=alert.rule_id,
+                        alert_severity=alert.severity,
+                        alert_rule_description=alert.rule_description,
+                        alert_message=alert.message,
+                        alert_file_path=alert.file_path,
+                        alert_start_line=alert.start_line,
+                        alert_end_line=alert.end_line,
+                        file_content=file_content,
+                    )
+                else:
+                    prompt = build_grouped_prompt_for_file(
+                        file_path=file_path,
+                        file_content=file_content,
+                        alerts=[
+                            {
+                                "rule_id": a.rule_id,
+                                "severity": a.severity,
+                                "rule_description": a.rule_description,
+                                "message": a.message,
+                                "start_line": a.start_line,
+                                "end_line": a.end_line,
+                            }
+                            for a in new_alerts
+                        ],
+                    )
 
                 prompt_tokens = count_tokens(prompt)
 
                 # 3. Call LLM (with inter-call delay for rate limiting)
-                logger.info("Calling %s for alert %d (%s)", tool, alert.number, alert.rule_id)
+                logger.info(
+                    "Calling %s for %d alert(s) in %s",
+                    tool, len(new_alerts), file_path,
+                )
 
                 await recorder.record(
                     tool=tool,
                     event_type="api_call_sent",
-                    detail=f"Sending alert context to {tool} for alert #{alert.number} ({alert.rule_id})",
-                    alert_number=alert.number,
+                    detail=(
+                        f"Sending {len(new_alerts)} grouped alert(s) for "
+                        f"{file_path} to {tool}"
+                    ),
+                    alert_number=new_alerts[0].number,
                     metadata={
                         "prompt_tokens": prompt_tokens,
                         "prompt_preview": prompt[:500],
                         "source_file_length": len(file_content),
-                        "file_path": alert.file_path,
+                        "file_path": file_path,
+                        "alert_count": len(new_alerts),
+                        "alert_numbers": [a.number for a in new_alerts],
                     },
                 )
 
@@ -366,8 +503,11 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                 await recorder.record(
                     tool=tool,
                     event_type="patch_generated",
-                    detail=f"{llm_result.model} generated fix for alert #{alert.number} ({alert.rule_id})",
-                    alert_number=alert.number,
+                    detail=(
+                        f"{llm_result.model} generated fix for "
+                        f"{len(new_alerts)} alert(s) in {file_path}"
+                    ),
+                    alert_number=new_alerts[0].number,
                     metadata={
                         "model": llm_result.model,
                         "latency_ms": llm_result.latency_ms,
@@ -375,68 +515,77 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                         "output_tokens": llm_result.output_tokens,
                         "fixed_content_length": len(llm_result.extracted_code),
                         "source_file_length": len(file_content),
-                        "file_path": alert.file_path,
+                        "file_path": file_path,
+                        "alert_count": len(new_alerts),
                     },
                 )
 
-                # 4. Commit the fix to the tool's branch
-                commit_msg = f"fix: remediate CodeQL alert #{alert.number} ({alert.rule_id}) via {tool}"
+                # 4. Commit the fix — one commit per file
+                alert_refs = ", ".join(f"#{a.number}" for a in new_alerts)
+                commit_msg = (
+                    f"fix: remediate {len(new_alerts)} CodeQL alert(s) "
+                    f"({alert_refs}) in {file_path} via {tool}"
+                )
                 commit_sha = await github.update_file_content(
-                    path=alert.file_path,
+                    path=file_path,
                     new_content=llm_result.extracted_code,
-                    branch=branch,
+                    branch=branch_name,
                     commit_message=commit_msg,
                 )
 
                 await recorder.record(
                     tool=tool,
                     event_type="patch_applied",
-                    detail=f"Patch committed to {branch} for alert #{alert.number}",
-                    alert_number=alert.number,
+                    detail=f"Patch committed to {branch_name} for {file_path}",
+                    alert_number=new_alerts[0].number,
                     metadata={
                         "commit_sha": commit_sha,
-                        "branch": branch,
-                        "file_path": alert.file_path,
+                        "branch": branch_name,
+                        "file_path": file_path,
                         "commit_message": commit_msg,
+                        "alert_numbers": [a.number for a in new_alerts],
                     },
                 )
 
-                # 5. Update job status
-                await db.execute(
-                    """UPDATE api_remediation_jobs
-                       SET status = 'completed', commit_sha = ?, updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (commit_sha, job_id),
-                )
+                # 5. Update all job statuses for this file group
+                for jid in job_ids:
+                    await db.execute(
+                        """UPDATE api_remediation_jobs
+                           SET status = 'completed', commit_sha = ?, updated_at = datetime('now')
+                           WHERE id = ?""",
+                        (commit_sha, jid),
+                    )
                 await db.commit()
-                completed += 1
+                completed += len(new_alerts)
 
                 logger.info(
-                    "Successfully remediated alert %d via %s (commit %s)",
-                    alert.number, tool, commit_sha[:8] if commit_sha else "unknown",
+                    "Successfully remediated %d alert(s) in %s via %s (commit %s)",
+                    len(new_alerts), file_path, tool,
+                    commit_sha[:8] if commit_sha else "unknown",
                 )
 
             except Exception as e:
                 error_msg = str(e)[:500]
-                logger.exception("Failed to remediate alert %d via %s", alert.number, tool)
-                await db.execute(
-                    """UPDATE api_remediation_jobs
-                       SET status = 'failed', error_message = ?, updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (error_msg, job_id),
-                )
+                logger.exception("Failed to remediate file %s via %s", file_path, tool)
+                for jid in job_ids:
+                    await db.execute(
+                        """UPDATE api_remediation_jobs
+                           SET status = 'failed', error_message = ?, updated_at = datetime('now')
+                           WHERE id = ?""",
+                        (error_msg, jid),
+                    )
                 await db.commit()
-                failed += 1
+                failed += len(new_alerts)
 
                 await recorder.record(
                     tool=tool,
                     event_type="error",
-                    detail=f"Failed to remediate alert #{alert.number}: {error_msg[:200]}",
-                    alert_number=alert.number,
+                    detail=f"Failed to remediate {file_path}: {error_msg[:200]}",
+                    alert_number=new_alerts[0].number,
                     metadata={
                         "error": error_msg,
-                        "rule_id": alert.rule_id,
-                        "file_path": alert.file_path,
+                        "file_path": file_path,
+                        "alert_numbers": alert_nums,
                     },
                 )
 
@@ -445,8 +594,9 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             tool=tool,
             event_type="remediation_complete",
             detail=(
-                f"Remediation complete: {completed} fixed, {failed} failed, "
-                f"{skipped} skipped out of {len(alerts)} alerts"
+                f"Remediation complete on {branch_name}: {completed} fixed, "
+                f"{failed} failed, {skipped} skipped out of {len(alerts)} alerts "
+                f"across {len(file_groups)} files"
             ),
             metadata={
                 "total_alerts": len(alerts),
@@ -454,6 +604,8 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
                 "failed": failed,
                 "skipped": skipped,
                 "tool": tool,
+                "branch": branch_name,
+                "file_count": len(file_groups),
             },
         )
         await recorder.finish()
@@ -489,7 +641,10 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             failed=failed,
             skipped=skipped,
             jobs=jobs,
-            message=f"Remediation complete: {completed} fixed, {failed} failed, {skipped} skipped",
+            message=(
+                f"Remediation complete on {branch_name}: "
+                f"{completed} fixed, {failed} failed, {skipped} skipped"
+            ),
         )
     except Exception:
         await recorder.finish("failed")

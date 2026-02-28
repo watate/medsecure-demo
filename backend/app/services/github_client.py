@@ -184,6 +184,43 @@ class GitHubClient:
             response.raise_for_status()
             return response.json()
 
+    async def get_branch_sha(self, branch: str) -> str:
+        """Get the HEAD commit SHA of a branch."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/git/ref/heads/{branch}",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()["object"]["sha"]
+
+    async def create_branch(self, new_branch: str, from_branch: str = "main") -> str:
+        """Create a new branch from an existing branch via GitHub API.
+
+        Returns the SHA of the new branch HEAD.
+        """
+        sha = await self.get_branch_sha(from_branch)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}/git/refs",
+                headers=self.headers,
+                json={
+                    "ref": f"refs/heads/{new_branch}",
+                    "sha": sha,
+                },
+            )
+            response.raise_for_status()
+            return response.json()["object"]["sha"]
+
+    async def branch_exists(self, branch: str) -> bool:
+        """Check if a branch exists."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/git/ref/heads/{branch}",
+                headers=self.headers,
+            )
+            return response.status_code == 200
+
     async def get_file_content(self, path: str, ref: str) -> str:
         """Get file content from a specific branch."""
         async with httpx.AsyncClient(timeout=30.0) as client:

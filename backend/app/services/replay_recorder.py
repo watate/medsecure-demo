@@ -35,9 +35,15 @@ class ReplayRecorder:
         await recorder.finish()
     """
 
-    def __init__(self, tools: list[str], scan_id: int | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[str],
+        scan_id: int | None = None,
+        branch_name: str | None = None,
+    ) -> None:
         self.tools = tools
         self.scan_id = scan_id
+        self.branch_name = branch_name
         self.run_id: int | None = None
         self._start_time: float = 0.0
 
@@ -49,8 +55,11 @@ class ReplayRecorder:
         db = await get_db()
         try:
             cursor = await db.execute(
-                "INSERT INTO replay_runs (repo, scan_id, started_at, status, tools) VALUES (?, ?, ?, ?, ?)",
-                (settings.github_repo, self.scan_id, now, "running", json.dumps(self.tools)),
+                "INSERT INTO replay_runs"
+                " (repo, scan_id, started_at, status, tools, branch_name)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (settings.github_repo, self.scan_id, now, "running",
+                 json.dumps(self.tools), self.branch_name),
             )
             self.run_id = cursor.lastrowid
             assert self.run_id is not None

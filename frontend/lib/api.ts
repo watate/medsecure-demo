@@ -156,6 +156,7 @@ export interface ReplayRun {
   ended_at: string | null;
   status: string;
   tools: string[];
+  branch_name: string | null;
 }
 
 export interface ReplayRunWithEvents extends ReplayRun {

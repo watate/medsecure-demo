@@ -77,7 +77,8 @@ async def init_db() -> None:
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 ended_at TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
-                tools TEXT NOT NULL DEFAULT '[]'
+                tools TEXT NOT NULL DEFAULT '[]',
+                branch_name TEXT
             );
 
             CREATE TABLE IF NOT EXISTS replay_events (
@@ -135,6 +136,13 @@ async def init_db() -> None:
         if "metadata" not in re_columns:
             await db.execute(
                 "ALTER TABLE replay_events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(replay_runs)")
+        rr_columns = {row[1] for row in await cursor.fetchall()}
+        if "branch_name" not in rr_columns:
+            await db.execute(
+                "ALTER TABLE replay_runs ADD COLUMN branch_name TEXT"
             )
 
         await db.commit()
