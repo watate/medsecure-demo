@@ -241,10 +241,16 @@ function MetadataBadges({ metadata }: { metadata: Record<string, unknown> }) {
   );
 }
 
-function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: number }) {
+function TimelineEvent({ event, maxOffset, isFirstRow }: { event: ReplayEvent; maxOffset: number; isFirstRow: boolean }) {
   const leftPct = maxOffset > 0 ? (event.timestamp_offset_ms / maxOffset) * 100 : 0;
   const icon = EVENT_ICONS[event.event_type] || "\u2022";
   const meta = event.metadata || {};
+
+  // For the first row, show tooltip below to avoid being clipped by the card boundary.
+  // For all other rows, show above as usual.
+  const tooltipPosition = isFirstRow
+    ? "absolute top-full left-1/2 -translate-x-1/2 mt-2 hidden group-hover:block z-10 w-80"
+    : "absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80";
 
   return (
     <div
@@ -253,7 +259,7 @@ function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: nu
     >
       <div className="relative cursor-pointer">
         <span className="text-sm">{icon}</span>
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80">
+        <div className={tooltipPosition}>
           <div className="rounded-lg border bg-popover p-3 text-xs shadow-md">
             <p className="font-medium">{event.event_type.replace(/_/g, " ")}</p>
             <p className="text-muted-foreground mt-1">{event.detail}</p>
@@ -280,7 +286,6 @@ function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: nu
 
 function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boolean }) {
   const maxOffset = run.total_duration_ms || Math.max(...run.events.map((e) => e.timestamp_offset_ms), 1);
-  const logEndRef = useRef<HTMLDivElement>(null);
 
   const visibleEvents = run.events;
 
@@ -330,10 +335,13 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
     return "running";
   };
 
-  // Auto-scroll event log in live mode
+  const logContainerRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll only the event log container (not the whole page) in live mode
   useEffect(() => {
-    if (isLive && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (isLive && logContainerRef.current) {
+      const el = logContainerRef.current;
+      el.scrollTop = el.scrollHeight;
     }
   }, [isLive, visibleEvents.length]);
 
@@ -446,7 +454,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
         </CardHeader>
         <CardContent>
           <div className="space-y-6">
-            {run.tools.map((tool) => {
+            {run.tools.map((tool, toolIndex) => {
               const toolEvents = eventsByTool[tool] || [];
 
               return (
@@ -464,6 +472,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                         key={event.id}
                         event={event}
                         maxOffset={maxOffset}
+                        isFirstRow={toolIndex === 0}
                       />
                     ))}
                   </div>
@@ -492,7 +501,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="max-h-96 overflow-y-auto space-y-1">
+          <div ref={logContainerRef} className="max-h-96 overflow-y-auto space-y-1">
             {visibleEvents.map((event) => {
               const meta = event.metadata || {};
               return (
@@ -524,7 +533,6 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                 Waiting for events...
               </p>
             )}
-            <div ref={logEndRef} />
           </div>
         </CardContent>
       </Card>
@@ -729,6 +737,9 @@ export default function RemediationPage() {
         </div>
         {setupCollapsed && (
           <div className="flex items-center gap-2">
+            <Badge variant="outline" className="text-sm font-mono">
+              {filteredAlertCount} alerts
+            </Badge>
             {benchmarkRunning && (
               <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
             )}
@@ -757,9 +768,6 @@ export default function RemediationPage() {
                 Stop Benchmark
               </Button>
             )}
-            <Button variant="outline" size="sm" onClick={() => setSetupCollapsed(false)}>
-              Show Setup
-            </Button>
             {!benchmarkRunning && (
               <Button variant="outline" size="sm" onClick={resetBenchmark}>
                 New Benchmark
