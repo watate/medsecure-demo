@@ -99,11 +99,25 @@ async def init_db() -> None:
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS api_remediation_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tool TEXT NOT NULL,
+                alert_number INTEGER NOT NULL,
+                rule_id TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                commit_sha TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
             CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
             CREATE INDEX IF NOT EXISTS idx_replay_events_run ON replay_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
+            CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_tool ON api_remediation_jobs(tool, status);
             """
         )
 

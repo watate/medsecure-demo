@@ -100,6 +100,30 @@ export interface HealthResponse {
   database: string;
 }
 
+// API Remediation types
+export interface ApiRemediationJob {
+  id: number;
+  tool: string;
+  alert_number: number;
+  rule_id: string;
+  file_path: string;
+  status: string;
+  commit_sha: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiRemediationResponse {
+  tool: string;
+  total_alerts: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  jobs: ApiRemediationJob[];
+  message: string;
+}
+
 // Report types
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type ReportData = Record<string, any>;
@@ -198,6 +222,17 @@ export const api = {
   listDevinSessions: () => fetchApi<DevinSession[]>("/api/remediate/devin/sessions"),
   refreshDevinSessions: () =>
     fetchApi<{ updated: number; total_running: number }>("/api/remediate/devin/refresh", { method: "POST" }),
+
+  // API-based Remediation (Anthropic, OpenAI, Google)
+  triggerApiRemediation: (tool: string, alertNumbers: number[]) =>
+    fetchApi<ApiRemediationResponse>("/api/remediate/api-tool", {
+      method: "POST",
+      body: JSON.stringify({ tool, alert_numbers: alertNumbers }),
+    }),
+  listApiRemediationJobs: (tool?: string) => {
+    const params = tool ? `?tool=${tool}` : "";
+    return fetchApi<ApiRemediationJob[]>(`/api/remediate/api-tool/jobs${params}`);
+  },
 
   // Reports
   generateReport: (reportType: "ciso" | "cto", scanId?: number, avgCost?: number, avgMinutes?: number) =>

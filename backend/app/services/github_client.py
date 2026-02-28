@@ -197,3 +197,44 @@ class GitHubClient:
             import base64
 
             return base64.b64decode(data["content"]).decode("utf-8")
+
+    async def get_file_sha(self, path: str, ref: str) -> str:
+        """Get the SHA of a file on a specific branch (needed for updates)."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/contents/{path}",
+                headers=self.headers,
+                params={"ref": ref},
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["sha"]
+
+    async def update_file_content(
+        self, path: str, new_content: str, branch: str, commit_message: str,
+    ) -> str:
+        """Update a file on a branch via the GitHub Contents API.
+
+        Returns the commit SHA of the new commit.
+        """
+        import base64
+
+        # Get current file SHA (required by the API)
+        file_sha = await self.get_file_sha(path, branch)
+
+        encoded = base64.b64encode(new_content.encode("utf-8")).decode("ascii")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.put(
+                f"{self.BASE_URL}/repos/{self.repo}/contents/{path}",
+                headers=self.headers,
+                json={
+                    "message": commit_message,
+                    "content": encoded,
+                    "sha": file_sha,
+                    "branch": branch,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("commit", {}).get("sha", "")

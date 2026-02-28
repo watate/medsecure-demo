@@ -184,6 +184,40 @@ class ReportMeta(BaseModel):
 # --- Replay schemas ---
 
 
+# --- API Remediation schemas ---
+
+
+class ApiRemediationJob(BaseModel):
+    id: int
+    tool: str
+    alert_number: int
+    rule_id: str
+    file_path: str
+    status: str
+    commit_sha: str | None = None
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ApiRemediationRequest(BaseModel):
+    tool: str  # anthropic, openai, gemini
+    alert_numbers: list[int]
+
+
+class ApiRemediationResponse(BaseModel):
+    tool: str
+    total_alerts: int
+    completed: int
+    failed: int
+    skipped: int
+    jobs: list[ApiRemediationJob]
+    message: str
+
+
+# --- Replay schemas ---
+
+
 class ReplayEvent(BaseModel):
     id: int
     run_id: int
