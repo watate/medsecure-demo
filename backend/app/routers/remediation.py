@@ -1158,11 +1158,12 @@ async def _benchmark_api_tool(
     alerts: list[Alert],
     resolved_repo: str,
     baseline_branch: str,
+    start_time: float | None = None,
 ) -> None:
     """Background task: run API-tool remediation and record to shared run."""
     key_attr = _API_TOOL_CONFIG.get(tool)
     if not key_attr or not getattr(settings, key_attr, None):
-        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo)
+        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
         await recorder.record(
             tool=tool,
             event_type="error",
@@ -1176,7 +1177,7 @@ async def _benchmark_api_tool(
     try:
         await github.create_branch(branch_name, from_branch=baseline_branch)
     except Exception as e:
-        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo)
+        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
         await recorder.record(
             tool=tool,
             event_type="error",
@@ -1186,7 +1187,7 @@ async def _benchmark_api_tool(
 
     file_groups = _group_alerts_by_file(alerts)
 
-    recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo)
+    recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
     await recorder.record(
         tool=tool,
         event_type="scan_started",
@@ -1354,10 +1355,11 @@ async def _benchmark_devin(
     alerts: list[Alert],
     resolved_repo: str,
     baseline_branch: str,
+    start_time: float | None = None,
 ) -> None:
     """Background task: run Devin remediation and record to shared run."""
     if not settings.devin_api_key:
-        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo)
+        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
         await recorder.record(
             tool="devin",
             event_type="error",
@@ -1372,7 +1374,7 @@ async def _benchmark_devin(
     try:
         await github.create_branch(branch_name, from_branch=baseline_branch)
     except Exception as e:
-        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo)
+        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
         await recorder.record(
             tool="devin",
             event_type="error",
@@ -1382,7 +1384,7 @@ async def _benchmark_devin(
 
     file_groups = _group_alerts_by_file(alerts)
 
-    recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo)
+    recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
     await recorder.record(
         tool="devin",
         event_type="scan_started",
@@ -1484,6 +1486,7 @@ async def _benchmark_copilot(
     alerts: list[Alert],
     resolved_repo: str,
     baseline_branch: str,
+    start_time: float | None = None,
 ) -> None:
     """Background task: run Copilot Autofix and record to shared run."""
     github = GitHubClient(repo=resolved_repo)
@@ -1492,7 +1495,7 @@ async def _benchmark_copilot(
     try:
         await github.create_branch(branch_name, from_branch=baseline_branch)
     except Exception as e:
-        recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo)
+        recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo, start_time=start_time)
         await recorder.record(
             tool="copilot",
             event_type="error",
@@ -1500,7 +1503,7 @@ async def _benchmark_copilot(
         )
         return
 
-    recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo)
+    recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo, start_time=start_time)
     await recorder.record(
         tool="copilot",
         event_type="scan_started",
@@ -1607,6 +1610,11 @@ async def _run_benchmark_tasks(
     tools: list[str],
 ) -> None:
     """Orchestrate all benchmark tool tasks with rate-limit-aware staggering."""
+    # Capture a single reference time so all tool recorders compute consistent
+    # timestamp_offset_ms values relative to the same start.
+    import time as _time_mod
+    run_start_time = _time_mod.monotonic()
+
     tasks: list[asyncio.Task[None]] = []
 
     for i, tool in enumerate(tools):
@@ -1616,15 +1624,15 @@ async def _run_benchmark_tasks(
 
         if tool == "devin":
             task = asyncio.create_task(
-                _benchmark_devin(run_id, alerts, resolved_repo, baseline_branch)
+                _benchmark_devin(run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
             )
         elif tool == "copilot":
             task = asyncio.create_task(
-                _benchmark_copilot(run_id, alerts, resolved_repo, baseline_branch)
+                _benchmark_copilot(run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
             )
         elif tool in _API_TOOL_CONFIG:
             task = asyncio.create_task(
-                _benchmark_api_tool(tool, run_id, alerts, resolved_repo, baseline_branch)
+                _benchmark_api_tool(tool, run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
             )
         else:
             continue

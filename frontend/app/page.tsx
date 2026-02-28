@@ -164,11 +164,13 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
 
-          {/* Tool Comparison Cards */}
+          {/* Tool Comparison Cards — always show all 5 tools */}
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-5">
-            {Object.entries(comparison.tools).map(([toolName, summary]) => {
+            {["devin", "copilot", "anthropic", "openai", "gemini"].map((toolName) => {
+              const summary = comparison.tools[toolName];
               const improvement = comparison.improvements[toolName];
               const fixRate = improvement?.fix_rate_pct ?? 0;
+              const est = comparison.cost_estimates?.[toolName];
 
               return (
                 <Card key={toolName} className="relative overflow-hidden">
@@ -176,36 +178,49 @@ export default function DashboardPage() {
                   <CardHeader>
                     <CardTitle className="flex items-center justify-between">
                       {TOOL_LABELS[toolName] || toolName}
-                      <Badge variant={fixRate > 50 ? "default" : "secondary"}>
-                        {fixRate}% fixed
-                      </Badge>
+                      {summary ? (
+                        <Badge variant={fixRate > 50 ? "default" : "secondary"}>
+                          {fixRate}% fixed
+                        </Badge>
+                      ) : (
+                        <Badge variant="outline">Not run</Badge>
+                      )}
                     </CardTitle>
-                    <CardDescription>{summary.branch}</CardDescription>
+                    <CardDescription>
+                      {summary ? summary.branch : "Run remediation to see results"}
+                    </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <p className="text-2xl font-bold">{summary.open}</p>
-                        <p className="text-xs text-muted-foreground">Remaining</p>
-                      </div>
-                      <div>
-                        <p className="text-2xl font-bold text-emerald-500">
-                          {improvement?.total_fixed ?? 0}
-                        </p>
-                        <p className="text-xs text-muted-foreground">Fixed</p>
-                      </div>
-                    </div>
+                    {summary ? (
+                      <>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-2xl font-bold">{summary.open}</p>
+                            <p className="text-xs text-muted-foreground">Remaining</p>
+                          </div>
+                          <div>
+                            <p className="text-2xl font-bold text-emerald-500">
+                              {improvement?.total_fixed ?? 0}
+                            </p>
+                            <p className="text-xs text-muted-foreground">Fixed</p>
+                          </div>
+                        </div>
 
-                    <div className="space-y-2">
-                      <SeverityBar label="Critical" count={summary.critical} total={comparison.baseline.critical || 1} color="bg-red-500" />
-                      <SeverityBar label="High" count={summary.high} total={comparison.baseline.high || 1} color="bg-orange-500" />
-                      <SeverityBar label="Medium" count={summary.medium} total={comparison.baseline.medium || 1} color="bg-yellow-500" />
-                      <SeverityBar label="Low" count={summary.low} total={comparison.baseline.low || 1} color="bg-blue-500" />
-                    </div>
+                        <div className="space-y-2">
+                          <SeverityBar label="Critical" count={summary.critical} total={comparison.baseline.critical || 1} color="bg-red-500" />
+                          <SeverityBar label="High" count={summary.high} total={comparison.baseline.high || 1} color="bg-orange-500" />
+                          <SeverityBar label="Medium" count={summary.medium} total={comparison.baseline.medium || 1} color="bg-yellow-500" />
+                          <SeverityBar label="Low" count={summary.low} total={comparison.baseline.low || 1} color="bg-blue-500" />
+                        </div>
+                      </>
+                    ) : (
+                      <p className="text-sm text-muted-foreground text-center py-4">
+                        No remediation data yet
+                      </p>
+                    )}
 
-                    {/* Cost estimate for all tools */}
-                    {comparison.cost_estimates?.[toolName] && (() => {
-                      const est = comparison.cost_estimates[toolName];
+                    {/* Cost estimate */}
+                    {est && (() => {
                       return (
                         <div className="pt-3 border-t">
                           <div className="flex items-center justify-between">
