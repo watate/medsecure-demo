@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { api, type ReportData } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -509,6 +510,7 @@ function CTOReport({ data }: { data: ReportData }) {
 }
 
 export default function ReportsPage() {
+  const { selectedRepo } = useRepo();
   const [reportType, setReportType] = useState<"ciso" | "cto">("ciso");
   const [report, setReport] = useState<ReportData | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -519,7 +521,7 @@ export default function ReportsPage() {
     setGenerating(true);
     setError(null);
     try {
-      const data = await api.generateReport(reportType);
+      const data = await api.generateReport(reportType, undefined, undefined, undefined, selectedRepo);
       setReport(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to generate report";
@@ -533,7 +535,7 @@ export default function ReportsPage() {
     setLoadingLatest(true);
     setError(null);
     try {
-      const data = await api.getLatestReport(reportType);
+      const data = await api.getLatestReport(reportType, selectedRepo);
       setReport(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "No report found";

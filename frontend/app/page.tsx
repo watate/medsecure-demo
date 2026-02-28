@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { api, type ComparisonResult } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ function SeverityBar({ label, count, total, color }: { label: string; count: num
 }
 
 export default function DashboardPage() {
+  const { selectedRepo } = useRepo();
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -45,7 +47,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.compareLatest();
+      const data = await api.compareLatest(selectedRepo);
       setComparison(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to load comparison";
@@ -58,13 +60,13 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedRepo]);
 
   const triggerScan = async () => {
     setScanning(true);
     setError(null);
     try {
-      await api.triggerScan();
+      await api.triggerScan(selectedRepo);
       await loadComparison();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to trigger scan");

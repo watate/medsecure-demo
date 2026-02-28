@@ -6,25 +6,24 @@ import logging
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
-from app.config import settings
 from app.models.schemas import BranchSummary, ReportRequest
 from app.services.database import get_db
 from app.services.github_client import GitHubClient
+from app.services.repo_resolver import (
+    get_latest_tool_branches,
+    resolve_baseline_branch,
+    resolve_repo,
+)
 from app.services.report_generator import generate_ciso_report, generate_cto_report
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
-def _get_branch_map() -> dict[str, str]:
-    return {
-        "baseline": settings.branch_baseline,
-        "devin": settings.branch_devin,
-        "copilot": settings.branch_copilot,
-        "anthropic": settings.branch_anthropic,
-        "openai": settings.branch_openai,
-        "gemini": settings.branch_google,
-    }
+async def _get_branch_map(repo: str) -> dict[str, str]:
+    baseline_branch = await resolve_baseline_branch(repo)
+    tool_branches = await get_latest_tool_branches(repo)
+    return {"baseline": baseline_branch, **tool_branches}
 
 
 async def _fetch_alerts_for_report(
@@ -53,15 +52,22 @@ async def _fetch_alerts_for_report(
 
 
 async def _get_summaries_from_scan(
+    repo: str,
     scan_id: int | None,
 ) -> tuple[BranchSummary | None, dict[str, BranchSummary] | None, str, int | None]:
     """Load scan summaries from DB. Returns (baseline_summary, tool_summaries, scan_date, resolved_scan_id)."""
     db = await get_db()
     try:
         if scan_id:
-            cursor = await db.execute("SELECT * FROM scans WHERE id = ?", (scan_id,))
+            cursor = await db.execute(
+                "SELECT * FROM scans WHERE repo = ? AND id = ?",
+                (repo, scan_id),
+            )
         else:
-            cursor = await db.execute("SELECT * FROM scans ORDER BY created_at DESC LIMIT 1")
+            cursor = await db.execute(
+                "SELECT * FROM scans WHERE repo = ? ORDER BY created_at DESC LIMIT 1",
+                (repo,),
+            )
         scan = await cursor.fetchone()
         if not scan:
             return None, None, "", None
@@ -110,6 +116,7 @@ async def _get_summaries_from_scan(
 async def generate_report(
     report_type: str,
     request: ReportRequest,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> dict:
     """Generate a CISO or CTO report.
 
@@ -118,14 +125,18 @@ async def generate_report(
     if report_type not in ("ciso", "cto"):
         raise HTTPException(status_code=400, detail="report_type must be 'ciso' or 'cto'")
 
+    resolved_repo = await resolve_repo(repo)
+
     # Get scan summaries
-    baseline_summary, tool_summaries, scan_date, resolved_scan_id = await _get_summaries_from_scan(request.scan_id)
+    baseline_summary, tool_summaries, scan_date, resolved_scan_id = await _get_summaries_from_scan(
+        resolved_repo, request.scan_id
+    )
     if not baseline_summary:
         raise HTTPException(status_code=404, detail="No scan data found. Trigger a scan first.")
 
     # Fetch live CWE-enriched alerts
-    github = GitHubClient()
-    branch_map = _get_branch_map()
+    github = GitHubClient(repo=resolved_repo)
+    branch_map = await _get_branch_map(resolved_repo)
 
     try:
         baseline_dicts, tool_alerts_map = await _fetch_alerts_for_report(github, branch_map)
@@ -138,12 +149,12 @@ async def generate_report(
         raise HTTPException(status_code=502, detail=f"GitHub API error: {e}") from e
 
     # Load remediation timing from replay events if available
-    remediation_times = await _get_remediation_times(resolved_scan_id)
+    remediation_times = await _get_remediation_times(resolved_repo, resolved_scan_id)
 
     if report_type == "ciso":
         assert tool_summaries is not None
         report = generate_ciso_report(
-            repo=settings.github_repo,
+            repo=resolved_repo,
             scan_created_at=scan_date,
             baseline_summary=baseline_summary,
             tool_summaries=tool_summaries,
@@ -154,7 +165,7 @@ async def generate_report(
     else:
         assert tool_summaries is not None
         report = generate_cto_report(
-            repo=settings.github_repo,
+            repo=resolved_repo,
             scan_created_at=scan_date,
             baseline_summary=baseline_summary,
             tool_summaries=tool_summaries,
@@ -181,16 +192,25 @@ async def generate_report(
 
 
 @router.get("/latest/{report_type}")
-async def get_latest_report(report_type: str) -> dict:
+async def get_latest_report(
+    report_type: str,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> dict:
     """Get the most recently generated report of a given type."""
     if report_type not in ("ciso", "cto"):
         raise HTTPException(status_code=400, detail="report_type must be 'ciso' or 'cto'")
 
     db = await get_db()
     try:
+        resolved_repo = await resolve_repo(repo)
         cursor = await db.execute(
-            "SELECT report_data FROM generated_reports WHERE report_type = ? ORDER BY created_at DESC LIMIT 1",
-            (report_type,),
+            """SELECT gr.report_data
+               FROM generated_reports gr
+               JOIN scans s ON gr.scan_id = s.id
+               WHERE gr.report_type = ? AND s.repo = ?
+               ORDER BY gr.created_at DESC
+               LIMIT 1""",
+            (report_type, resolved_repo),
         )
         row = await cursor.fetchone()
         if not row:
@@ -203,20 +223,29 @@ async def get_latest_report(report_type: str) -> dict:
 @router.get("/history")
 async def list_reports(
     report_type: str | None = Query(default=None),
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> list[dict]:
     """List all generated reports."""
     db = await get_db()
     try:
+        resolved_repo = await resolve_repo(repo)
         if report_type:
             cursor = await db.execute(
-                "SELECT id, scan_id, report_type, created_at"
-                " FROM generated_reports WHERE report_type = ?"
-                " ORDER BY created_at DESC",
-                (report_type,),
+                """SELECT gr.id, gr.scan_id, gr.report_type, gr.created_at
+                   FROM generated_reports gr
+                   JOIN scans s ON gr.scan_id = s.id
+                   WHERE gr.report_type = ? AND s.repo = ?
+                   ORDER BY gr.created_at DESC""",
+                (report_type, resolved_repo),
             )
         else:
             cursor = await db.execute(
-                "SELECT id, scan_id, report_type, created_at FROM generated_reports ORDER BY created_at DESC"
+                """SELECT gr.id, gr.scan_id, gr.report_type, gr.created_at
+                   FROM generated_reports gr
+                   JOIN scans s ON gr.scan_id = s.id
+                   WHERE s.repo = ?
+                   ORDER BY gr.created_at DESC""",
+                (resolved_repo,),
             )
         rows = await cursor.fetchall()
         return [
@@ -232,7 +261,10 @@ async def list_reports(
         await db.close()
 
 
-async def _get_remediation_times(scan_id: int | None) -> dict[str, float] | None:
+async def _get_remediation_times(
+    repo: str,
+    scan_id: int | None,
+) -> dict[str, float] | None:
     """Get remediation timing from replay events if available."""
     db = await get_db()
     try:
@@ -240,9 +272,9 @@ async def _get_remediation_times(scan_id: int | None) -> dict[str, float] | None
             """SELECT re.tool, MAX(re.timestamp_offset_ms) as max_offset
                FROM replay_events re
                JOIN replay_runs rr ON re.run_id = rr.id
-               WHERE (? IS NULL OR rr.scan_id = ?)
+               WHERE rr.repo = ? AND (? IS NULL OR rr.scan_id = ?)
                GROUP BY re.tool""",
-            (scan_id, scan_id),
+            (repo, scan_id, scan_id),
         )
         rows = await cursor.fetchall()
         if not rows:

@@ -1,7 +1,7 @@
 import logging
 from collections import defaultdict
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.config import settings
 from app.models.schemas import (
@@ -21,6 +21,7 @@ from app.services.devin_client import DevinClient
 from app.services.github_client import GitHubClient
 from app.services.llm_client import call_llm_with_delay
 from app.services.replay_recorder import ReplayRecorder
+from app.services.repo_resolver import resolve_baseline_branch, resolve_repo
 from app.services.token_counter import (
     build_grouped_prompt_for_file,
     build_prompt_for_alert,
@@ -30,11 +31,11 @@ from app.services.token_counter import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/remediate", tags=["remediation"])
 
-# Map tool key → (config attr for branch, config attr for API key)
+# Map tool key → config attr for API key
 _API_TOOL_CONFIG = {
-    "anthropic": ("branch_anthropic", "anthropic_api_key"),
-    "openai": ("branch_openai", "openai_api_key"),
-    "gemini": ("branch_google", "gemini_api_key"),
+    "anthropic": "anthropic_api_key",
+    "openai": "openai_api_key",
+    "gemini": "gemini_api_key",
 }
 
 
@@ -48,7 +49,10 @@ def _group_alerts_by_file(alerts: list[Alert]) -> dict[str, list[Alert]]:
 
 
 @router.post("/devin", response_model=RemediationResponse)
-async def trigger_devin_remediation(request: RemediationRequest) -> RemediationResponse:
+async def trigger_devin_remediation(
+    request: RemediationRequest,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> RemediationResponse:
     """Create Devin sessions to fix CodeQL alerts.
 
     Creates a fresh branch from main via GitHub API, groups alerts by file,
@@ -57,11 +61,14 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
     if not settings.devin_api_key:
         raise HTTPException(status_code=400, detail="DEVIN_API_KEY not configured")
 
-    github = GitHubClient()
+    resolved_repo = await resolve_repo(repo)
+    baseline_branch = await resolve_baseline_branch(resolved_repo)
+
+    github = GitHubClient(repo=resolved_repo)
     devin = DevinClient()
 
-    # Get open alerts from baseline (main) branch
-    alerts = await github.get_alerts(settings.branch_baseline, state="open")
+    # Get open alerts from baseline branch
+    alerts = await github.get_alerts(baseline_branch, state="open")
 
     if request.alert_numbers:
         alerts = [a for a in alerts if a.number in request.alert_numbers]
@@ -69,13 +76,17 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
     if not alerts:
         return RemediationResponse(sessions_created=0, sessions=[], message="No open alerts to remediate")
 
-    # Limit batch size
-    alerts = alerts[: request.batch_size]
+    # Batch by file groups (batch_size counts files)
+    batch_size = max(1, request.batch_size)
+    file_groups_all = _group_alerts_by_file(alerts)
+    selected_paths = sorted(file_groups_all.keys())[:batch_size]
+    file_groups = {p: file_groups_all[p] for p in selected_paths}
+    alerts = [a for p in selected_paths for a in file_groups_all[p]]
 
-    # Create a fresh branch from main for this remediation run
+    # Create a fresh branch from baseline for this remediation run
     branch_name = f"remediate/devin-{int(__import__('time').time())}"
     try:
-        await github.create_branch(branch_name, from_branch=settings.branch_baseline)
+        await github.create_branch(branch_name, from_branch=baseline_branch)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -83,19 +94,17 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
         ) from e
 
     # Start replay recording with the new branch name
-    recorder = ReplayRecorder(tools=["devin"], branch_name=branch_name)
+    recorder = ReplayRecorder(tools=["devin"], branch_name=branch_name, repo=resolved_repo)
     await recorder.start()
-
-    # Group alerts by file to avoid conflicts
-    file_groups = _group_alerts_by_file(alerts)
 
     await recorder.record(
         tool="devin",
         event_type="scan_started",
         detail=f"CodeQL scan detected {len(alerts)} open alerts across {len(file_groups)} files",
         metadata={
+            "repo": resolved_repo,
             "branch": branch_name,
-            "source_branch": settings.branch_baseline,
+            "source_branch": baseline_branch,
             "alert_count": len(alerts),
             "file_count": len(file_groups),
             "grouped_files": list(file_groups.keys()),
@@ -114,8 +123,10 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
             new_alerts: list[Alert] = []
             for alert in file_alerts:
                 cursor = await db.execute(
-                    "SELECT * FROM devin_sessions WHERE alert_number = ? AND status NOT IN ('failed', 'stopped')",
-                    (alert.number,),
+                    "SELECT * FROM devin_sessions "
+                    "WHERE repo = ? AND alert_number = ? "
+                    "AND status NOT IN ('failed', 'stopped')",
+                    (resolved_repo, alert.number),
                 )
                 existing = await cursor.fetchone()
                 if existing:
@@ -159,28 +170,28 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
                 # Use grouped session if multiple alerts, single otherwise
                 if len(new_alerts) == 1:
                     result = await devin.create_remediation_session(
-                        new_alerts[0], settings.github_repo, branch_name,
+                        new_alerts[0], resolved_repo, branch_name,
                     )
                 else:
                     result = await devin.create_grouped_session(
-                        new_alerts, settings.github_repo, branch_name,
+                        new_alerts, resolved_repo, branch_name,
                     )
                 session_id = result.get("session_id", "")
 
                 # Record a devin_sessions row per alert (all share same session_id)
                 for alert in new_alerts:
                     await db.execute(
-                        """INSERT INTO devin_sessions (session_id, alert_number, rule_id, file_path, status)
-                           VALUES (?, ?, ?, ?, 'running')""",
-                        (session_id, alert.number, alert.rule_id, alert.file_path),
+                        """INSERT INTO devin_sessions (repo, session_id, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, ?, 'running')""",
+                        (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
                     )
                 # Commit after INSERTs to release SQLite write lock so
                 # ReplayRecorder (which uses its own connection) can write.
                 await db.commit()
 
                 cursor = await db.execute(
-                    "SELECT * FROM devin_sessions WHERE session_id = ? LIMIT 1",
-                    (session_id,),
+                    "SELECT * FROM devin_sessions WHERE repo = ? AND session_id = ? LIMIT 1",
+                    (resolved_repo, session_id),
                 )
                 row = await cursor.fetchone()
                 if row:
@@ -269,11 +280,17 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
 
 
 @router.get("/devin/sessions", response_model=list[DevinSession])
-async def list_devin_sessions() -> list[DevinSession]:
-    """List all Devin remediation sessions."""
+async def list_devin_sessions(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> list[DevinSession]:
+    """List Devin remediation sessions for a repo."""
+    resolved_repo = await resolve_repo(repo)
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT * FROM devin_sessions ORDER BY created_at DESC")
+        cursor = await db.execute(
+            "SELECT * FROM devin_sessions WHERE repo = ? ORDER BY created_at DESC",
+            (resolved_repo,),
+        )
         rows = await cursor.fetchall()
 
         return [
@@ -295,7 +312,10 @@ async def list_devin_sessions() -> list[DevinSession]:
 
 
 @router.post("/api-tool", response_model=ApiRemediationResponse)
-async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediationResponse:
+async def trigger_api_remediation(
+    request: ApiRemediationRequest,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> ApiRemediationResponse:
     """Trigger remediation using an API-based tool (Anthropic, OpenAI, or Google).
 
     Creates a fresh branch from main, groups alerts by file, and for each file:
@@ -311,7 +331,7 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             detail=f"Unknown API tool: {tool}. Must be one of: {list(_API_TOOL_CONFIG.keys())}",
         )
 
-    _branch_attr, key_attr = _API_TOOL_CONFIG[tool]
+    key_attr = _API_TOOL_CONFIG[tool]
     api_key = getattr(settings, key_attr)
 
     if not api_key:
@@ -320,10 +340,13 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             detail=f"{key_attr.upper()} not configured. Set it in your .env file.",
         )
 
-    github = GitHubClient()
+    resolved_repo = await resolve_repo(repo)
+    baseline_branch = await resolve_baseline_branch(resolved_repo)
 
-    # Fetch open alerts from baseline (main) branch
-    alerts = await github.get_alerts(settings.branch_baseline, state="open")
+    github = GitHubClient(repo=resolved_repo)
+
+    # Fetch open alerts from baseline branch
+    alerts = await github.get_alerts(baseline_branch, state="open")
 
     # Filter to requested alert numbers
     requested_set = set(request.alert_numbers)
@@ -343,7 +366,7 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
     # Create a fresh branch from main for this remediation run
     branch_name = f"remediate/{tool}-{int(__import__('time').time())}"
     try:
-        await github.create_branch(branch_name, from_branch=settings.branch_baseline)
+        await github.create_branch(branch_name, from_branch=baseline_branch)
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -354,7 +377,7 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
     file_groups = _group_alerts_by_file(alerts)
 
     # Start replay recording with the new branch
-    recorder = ReplayRecorder(tools=[tool], branch_name=branch_name)
+    recorder = ReplayRecorder(tools=[tool], branch_name=branch_name, repo=resolved_repo)
     await recorder.start()
     await recorder.record(
         tool=tool,
@@ -364,8 +387,9 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             f"across {len(file_groups)} files on {branch_name}"
         ),
         metadata={
+            "repo": resolved_repo,
             "branch": branch_name,
-            "source_branch": settings.branch_baseline,
+            "source_branch": baseline_branch,
             "alert_count": len(alerts),
             "file_count": len(file_groups),
             "grouped_files": list(file_groups.keys()),
@@ -387,8 +411,10 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             new_alerts: list[Alert] = []
             for alert in file_alerts:
                 cursor = await db.execute(
-                    "SELECT * FROM api_remediation_jobs WHERE tool = ? AND alert_number = ? AND status = 'completed'",
-                    (tool, alert.number),
+                    "SELECT * FROM api_remediation_jobs "
+                    "WHERE repo = ? AND tool = ? AND alert_number = ? "
+                    "AND status = 'completed'",
+                    (resolved_repo, tool, alert.number),
                 )
                 existing = await cursor.fetchone()
                 if existing:
@@ -415,9 +441,9 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             job_ids: list[int] = []
             for alert in new_alerts:
                 cursor = await db.execute(
-                    """INSERT INTO api_remediation_jobs (tool, alert_number, rule_id, file_path, status)
-                       VALUES (?, ?, ?, ?, 'running')""",
-                    (tool, alert.number, alert.rule_id, alert.file_path),
+                    """INSERT INTO api_remediation_jobs (repo, tool, alert_number, rule_id, file_path, status)
+                       VALUES (?, ?, ?, ?, ?, 'running')""",
+                    (resolved_repo, tool, alert.number, alert.rule_id, alert.file_path),
                 )
                 job_ids.append(cursor.lastrowid or 0)
             await db.commit()
@@ -657,18 +683,23 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
 
 
 @router.get("/api-tool/jobs", response_model=list[ApiRemediationJob])
-async def list_api_remediation_jobs(tool: str | None = None) -> list[ApiRemediationJob]:
-    """List API remediation jobs, optionally filtered by tool."""
+async def list_api_remediation_jobs(
+    tool: str | None = None,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> list[ApiRemediationJob]:
+    """List API remediation jobs for a repo, optionally filtered by tool."""
+    resolved_repo = await resolve_repo(repo)
     db = await get_db()
     try:
         if tool:
             cursor = await db.execute(
-                "SELECT * FROM api_remediation_jobs WHERE tool = ? ORDER BY created_at DESC",
-                (tool,),
+                "SELECT * FROM api_remediation_jobs WHERE repo = ? AND tool = ? ORDER BY created_at DESC",
+                (resolved_repo, tool),
             )
         else:
             cursor = await db.execute(
-                "SELECT * FROM api_remediation_jobs ORDER BY created_at DESC"
+                "SELECT * FROM api_remediation_jobs WHERE repo = ? ORDER BY created_at DESC",
+                (resolved_repo,),
             )
         rows = await cursor.fetchall()
         return [
@@ -691,8 +722,10 @@ async def list_api_remediation_jobs(tool: str | None = None) -> list[ApiRemediat
 
 
 @router.post("/devin/refresh")
-async def refresh_devin_sessions() -> dict:
-    """Refresh status of all running Devin sessions."""
+async def refresh_devin_sessions(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> dict:
+    """Refresh status of running Devin sessions for a repo."""
     if not settings.devin_api_key:
         raise HTTPException(status_code=400, detail="DEVIN_API_KEY not configured")
 
@@ -701,7 +734,11 @@ async def refresh_devin_sessions() -> dict:
     updated_count = 0
 
     try:
-        cursor = await db.execute("SELECT * FROM devin_sessions WHERE status = 'running'")
+        resolved_repo = await resolve_repo(repo)
+        cursor = await db.execute(
+            "SELECT * FROM devin_sessions WHERE repo = ? AND status = 'running'",
+            (resolved_repo,),
+        )
         rows = await cursor.fetchall()
 
         for row in rows:
@@ -713,8 +750,8 @@ async def refresh_devin_sessions() -> dict:
                 await db.execute(
                     """UPDATE devin_sessions
                        SET status = ?, pr_url = ?, updated_at = datetime('now')
-                       WHERE session_id = ?""",
-                    (new_status, pr_url, row["session_id"]),
+                       WHERE repo = ? AND session_id = ?""",
+                    (new_status, pr_url, row["repo"], row["session_id"]),
                 )
                 updated_count += 1
             except Exception:
@@ -736,6 +773,7 @@ COPILOT_INTER_ALERT_DELAY = 2.0  # seconds between trigger calls
 @router.post("/copilot", response_model=CopilotAutofixResponse)
 async def trigger_copilot_remediation(
     request: CopilotAutofixRequest,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> CopilotAutofixResponse:
     """Trigger remediation using GitHub Copilot Autofix.
 
@@ -753,12 +791,15 @@ async def trigger_copilot_remediation(
     import asyncio
     import time as _time
 
+    resolved_repo = await resolve_repo(repo)
+    baseline_branch = await resolve_baseline_branch(resolved_repo)
+
     # Use request override if provided, otherwise fall back to env var
     batch_size = max(1, request.batch_size or settings.batch_size)
-    github = GitHubClient()
+    github = GitHubClient(repo=resolved_repo)
 
     # Fetch open alerts from baseline branch
-    alerts = await github.get_alerts(settings.branch_baseline, state="open")
+    alerts = await github.get_alerts(baseline_branch, state="open")
     requested_set = set(request.alert_numbers)
     alerts = [a for a in alerts if a.number in requested_set]
 
@@ -787,7 +828,7 @@ async def trigger_copilot_remediation(
     branch_name = f"remediate/copilot-{int(_time.time())}"
     try:
         await github.create_branch(
-            branch_name, from_branch=settings.branch_baseline,
+            branch_name, from_branch=baseline_branch,
         )
     except Exception as e:
         raise HTTPException(
@@ -796,7 +837,7 @@ async def trigger_copilot_remediation(
         ) from e
 
     # Start replay recording
-    recorder = ReplayRecorder(tools=["copilot"], branch_name=branch_name)
+    recorder = ReplayRecorder(tools=["copilot"], branch_name=branch_name, repo=resolved_repo)
     await recorder.start()
     await recorder.record(
         tool="copilot",
@@ -807,8 +848,9 @@ async def trigger_copilot_remediation(
             f"of up to {batch_size} files on {branch_name}"
         ),
         metadata={
+            "repo": resolved_repo,
             "branch": branch_name,
-            "source_branch": settings.branch_baseline,
+            "source_branch": baseline_branch,
             "alert_count": len(alerts),
             "file_count": len(file_group_items),
             "batch_size": batch_size,
@@ -857,8 +899,10 @@ async def trigger_copilot_remediation(
 
                     # Check if already processed
                     cursor = await db.execute(
-                        "SELECT * FROM copilot_autofix_jobs WHERE alert_number = ? AND status = 'completed'",
-                        (alert.number,),
+                        "SELECT * FROM copilot_autofix_jobs "
+                        "WHERE repo = ? AND alert_number = ? "
+                        "AND status = 'completed'",
+                        (resolved_repo, alert.number),
                     )
                     existing = await cursor.fetchone()
                     if existing:
@@ -883,9 +927,9 @@ async def trigger_copilot_remediation(
                     # Insert a pending job row
                     cursor = await db.execute(
                         """INSERT INTO copilot_autofix_jobs
-                           (alert_number, rule_id, file_path, status)
-                           VALUES (?, ?, ?, 'running')""",
-                        (alert.number, alert.rule_id, alert.file_path),
+                           (repo, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, 'running')""",
+                        (resolved_repo, alert.number, alert.rule_id, alert.file_path),
                     )
                     job_id = cursor.lastrowid or 0
                     await db.commit()
@@ -1033,9 +1077,9 @@ async def trigger_copilot_remediation(
         placeholders = ",".join("?" * len(request.alert_numbers))
         cursor = await db.execute(
             f"""SELECT * FROM copilot_autofix_jobs
-                WHERE alert_number IN ({placeholders})
+                WHERE repo = ? AND alert_number IN ({placeholders})
                 ORDER BY created_at DESC""",
-            tuple(request.alert_numbers),
+            (resolved_repo, *tuple(request.alert_numbers)),
         )
         rows = await cursor.fetchall()
         jobs = [

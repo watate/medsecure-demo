@@ -6,13 +6,8 @@ class Settings(BaseSettings):
     github_token: str = ""
     github_repo: str = "watate/tomcat"
 
-    # Branch configuration
+    # Default baseline branch
     branch_baseline: str = "main"
-    branch_devin: str = "tomcat-devin"
-    branch_copilot: str = "tomcat-copilot"
-    branch_anthropic: str = "tomcat-anthropic"
-    branch_openai: str = "tomcat-openai"
-    branch_google: str = "tomcat-google"
 
     # Devin API
     devin_api_key: str = ""

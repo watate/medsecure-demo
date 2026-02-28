@@ -123,11 +123,26 @@ class DevinSessionCreate(BaseModel):
 class RepoConfig(BaseModel):
     github_repo: str
     branch_baseline: str
-    branch_devin: str
-    branch_copilot: str
-    branch_anthropic: str
-    branch_openai: str
-    branch_google: str
+
+
+class Repo(BaseModel):
+    id: int
+    full_name: str
+    default_branch: str
+    added_at: str
+
+
+class RepoAdd(BaseModel):
+    full_name: str  # e.g. "owner/repo"
+
+
+class GitHubRepoInfo(BaseModel):
+    full_name: str
+    description: str | None = None
+    default_branch: str
+    private: bool
+    language: str | None = None
+    html_url: str
 
 
 class HealthResponse(BaseModel):

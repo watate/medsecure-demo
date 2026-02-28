@@ -22,6 +22,68 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    async def list_accessible_repos(self, per_page: int = 100) -> list[dict]:
+        """List repositories accessible by the configured PAT.
+
+        Returns a list of dicts with repo metadata (full_name, description,
+        default_branch, private, language, html_url).
+        """
+        repos: list[dict] = []
+        page = 1
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                response = await client.get(
+                    f"{self.BASE_URL}/user/repos",
+                    headers=self.headers,
+                    params={
+                        "per_page": per_page,
+                        "page": page,
+                        "sort": "updated",
+                        "direction": "desc",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if not data:
+                    break
+
+                for item in data:
+                    repos.append({
+                        "full_name": item["full_name"],
+                        "description": item.get("description"),
+                        "default_branch": item.get("default_branch", "main"),
+                        "private": item.get("private", False),
+                        "language": item.get("language"),
+                        "html_url": item.get("html_url", ""),
+                    })
+
+                if len(data) < per_page:
+                    break
+                page += 1
+
+        return repos
+
+    async def get_repo_info(self, repo: str | None = None) -> dict:
+        """Get metadata for a single repository."""
+        target = repo or self.repo
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{target}",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            item = response.json()
+            return {
+                "full_name": item["full_name"],
+                "description": item.get("description"),
+                "default_branch": item.get("default_branch", "main"),
+                "private": item.get("private", False),
+                "language": item.get("language"),
+                "html_url": item.get("html_url", ""),
+            }
+
     async def get_alerts(self, branch: str, state: str | None = None, per_page: int = 100) -> list[Alert]:
         """Fetch CodeQL alerts for a specific branch."""
         alerts: list[Alert] = []

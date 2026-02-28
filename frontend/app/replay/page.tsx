@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef } from "react";
 import { api, type ReplayRunWithEvents, type ReplayRun, type ReplayEvent } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -391,6 +392,7 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
 }
 
 export default function ReplayPage() {
+  const { selectedRepo } = useRepo();
   const [runs, setRuns] = useState<ReplayRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<ReplayRunWithEvents | null>(null);
   const [loading, setLoading] = useState(false);
@@ -399,14 +401,15 @@ export default function ReplayPage() {
 
   const loadRuns = useCallback(async () => {
     try {
-      const data = await api.listReplayRuns();
+      const data = await api.listReplayRuns(selectedRepo);
       setRuns(data);
     } catch {
       // Ignore errors on initial load
     }
-  }, []);
+  }, [selectedRepo]);
 
   useEffect(() => {
+    setSelectedRun(null);
     loadRuns();
   }, [loadRuns]);
 
@@ -427,7 +430,7 @@ export default function ReplayPage() {
     setSeeding(true);
     setError(null);
     try {
-      const result = await api.seedDemoReplay();
+      const result = await api.seedDemoReplay(selectedRepo);
       await loadRuns();
       await loadRun(result.run_id);
     } catch (e) {
