@@ -2460,7 +2460,7 @@ async def get_spotbugs_results(
 
         try:
             runs = await github.get_workflow_runs_for_branch(
-                branch, workflow_name=SPOTBUGS_WORKFLOW_NAME, per_page=1,
+                branch, workflow_name=SPOTBUGS_WORKFLOW_NAME, per_page=5,
             )
 
             if not runs:
