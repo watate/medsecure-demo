@@ -60,7 +60,7 @@ async def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS devin_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
                 alert_number INTEGER NOT NULL,
                 rule_id TEXT NOT NULL,
                 file_path TEXT NOT NULL DEFAULT '',
@@ -117,6 +117,8 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
             CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_devin_sessions_session_alert
+                ON devin_sessions(session_id, alert_number);
             CREATE INDEX IF NOT EXISTS idx_replay_events_run ON replay_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
             CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_tool ON api_remediation_jobs(tool, status);
@@ -143,6 +145,40 @@ async def init_db() -> None:
         if "branch_name" not in rr_columns:
             await db.execute(
                 "ALTER TABLE replay_runs ADD COLUMN branch_name TEXT"
+            )
+
+        # Migrate devin_sessions: remove UNIQUE constraint on session_id
+        # so grouped sessions (multiple alerts per session) can share one id.
+        cursor = await db.execute("PRAGMA index_list(devin_sessions)")
+        index_rows = await cursor.fetchall()
+        has_unique_idx = any(
+            row[1] == "sqlite_autoindex_devin_sessions_1"
+            for row in index_rows
+        )
+        if has_unique_idx:
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS devin_sessions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    alert_number INTEGER NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    pr_url TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO devin_sessions_new
+                    SELECT * FROM devin_sessions;
+                DROP TABLE devin_sessions;
+                ALTER TABLE devin_sessions_new
+                    RENAME TO devin_sessions;
+                CREATE INDEX IF NOT EXISTS idx_devin_sessions_status
+                    ON devin_sessions(status);
+                CREATE INDEX IF NOT EXISTS idx_devin_sessions_session_alert
+                    ON devin_sessions(session_id, alert_number);
+                """
             )
 
         await db.commit()
