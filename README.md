@@ -63,11 +63,8 @@ cp frontend/.env.example frontend/.env
 cd frontend
 npm install
 
-# Create auth database tables
-npx @better-auth/cli migrate
-
-# Seed a user by adding details to frontend/.env, then run:
-npm run seed
+# Runs migrations + seeds a user (reads SEED_EMAIL/SEED_PASSWORD from .env)
+npm run setup
 ```
 
 ### 5. Run locally
@@ -85,7 +82,8 @@ npm run dev
 
 Open http://localhost:3000. Sign in with your seeded credentials, then click "Run New Scan" to fetch CodeQL alerts.
 
-## Deploy to AWS (Optional)
+<details>
+<summary><strong>Deploy to AWS (Optional)</strong></summary>
 
 ### Prerequisites
 
@@ -123,6 +121,8 @@ bash deploy.sh
 
 SQLite database is stored on a Docker volume at `/data/medsecure.db` and backed up to S3 every 6 hours.
 
+</details>
+
 ## API Endpoints
 
 All endpoints except `/api/health` require authentication (better-auth session cookie).
@@ -159,9 +159,6 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 | `AUTH_DB_PATH` | No | Path to better-auth SQLite database (default: `../frontend/auth.db`) |
 | `CORS_ORIGINS` | No | Allowed origins (default: `http://localhost:3000`) |
 | `BRANCH_BASELINE` | No | Baseline branch (default: `main`) |
-| `BRANCH_DEVIN` | No | Devin fix branch (default: `tomcat-devin`) |
-| `BRANCH_COPILOT` | No | Copilot fix branch (default: `tomcat-copilot`) |
-| `BRANCH_ANTHROPIC` | No | Anthropic fix branch (default: `tomcat-anthropic`) |
 | `DATABASE_PATH` | No | SQLite path (default: `medsecure.db`) |
 | `S3_BACKUP_BUCKET` | For backups | S3 bucket name |
 
