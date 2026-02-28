@@ -20,7 +20,12 @@ from app.services.database import get_db
 from app.services.devin_client import DevinClient
 from app.services.github_client import GitHubClient
 from app.services.llm_client import call_llm_with_delay
-from app.services.replay_recorder import ReplayRecorder
+from app.services.replay_recorder import (
+    COPILOT_COST_PER_REQUEST,
+    ReplayRecorder,
+    compute_devin_session_cost,
+    compute_llm_call_cost,
+)
 from app.services.repo_resolver import resolve_baseline_branch, resolve_repo
 from app.services.token_counter import (
     build_grouped_prompt_for_file,
@@ -302,6 +307,7 @@ async def list_devin_sessions(
                 file_path=row["file_path"],
                 status=row["status"],
                 pr_url=row["pr_url"],
+                acus=row["acus"] if "acus" in row.keys() else None,
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
@@ -529,6 +535,11 @@ async def trigger_api_remediation(
                 if not llm_result.extracted_code or not llm_result.extracted_code.strip():
                     raise ValueError("LLM returned empty response")
 
+                # Compute cost for this LLM call
+                call_cost = compute_llm_call_cost(
+                    tool, llm_result.input_tokens, llm_result.output_tokens,
+                )
+
                 await recorder.record(
                     tool=tool,
                     event_type="patch_generated",
@@ -547,6 +558,7 @@ async def trigger_api_remediation(
                         "file_path": file_path,
                         "alert_count": len(new_alerts),
                     },
+                    cost_usd=call_cost,
                 )
 
                 # 4. Commit the fix — one commit per file
@@ -747,11 +759,14 @@ async def refresh_devin_sessions(
                 new_status = status_data.get("status_enum", "unknown")
                 pr_url = status_data.get("pull_request", {}).get("url") if status_data.get("pull_request") else None
 
+                # Extract ACU usage if available in the response
+                acus = status_data.get("total_acus") or status_data.get("acus")
+
                 await db.execute(
                     """UPDATE devin_sessions
-                       SET status = ?, pr_url = ?, updated_at = datetime('now')
+                       SET status = ?, pr_url = ?, acus = COALESCE(?, acus), updated_at = datetime('now')
                        WHERE repo = ? AND session_id = ?""",
-                    (new_status, pr_url, row["repo"], row["session_id"]),
+                    (new_status, pr_url, acus, row["repo"], row["session_id"]),
                 )
                 updated_count += 1
             except Exception:
@@ -949,6 +964,7 @@ async def trigger_copilot_remediation(
                                 "file_path": alert.file_path,
                                 "severity": alert.severity,
                             },
+                            cost_usd=COPILOT_COST_PER_REQUEST,
                         )
 
                         autofix = await github.poll_autofix(alert.number)

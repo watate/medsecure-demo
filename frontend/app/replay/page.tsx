@@ -69,6 +69,10 @@ function MetadataBadges({ metadata }: { metadata: Record<string, unknown> }) {
   if (metadata.input_tokens != null) badges.push({ label: "In", value: `${Number(metadata.input_tokens).toLocaleString()} tok` });
   if (metadata.output_tokens != null) badges.push({ label: "Out", value: `${Number(metadata.output_tokens).toLocaleString()} tok` });
   if (metadata.prompt_tokens != null) badges.push({ label: "Prompt", value: `${Number(metadata.prompt_tokens).toLocaleString()} tok` });
+  if (metadata.event_cost_usd != null && Number(metadata.event_cost_usd) > 0)
+    badges.push({ label: "Cost", value: `$${Number(metadata.event_cost_usd).toFixed(4)}` });
+  if (metadata.cumulative_cost_usd != null && Number(metadata.cumulative_cost_usd) > 0)
+    badges.push({ label: "Running Total", value: `$${Number(metadata.cumulative_cost_usd).toFixed(4)}` });
   if (metadata.commit_sha) badges.push({ label: "Commit", value: String(metadata.commit_sha).slice(0, 8) });
   if (metadata.severity) badges.push({ label: "Severity", value: String(metadata.severity) });
   if (metadata.branch) badges.push({ label: "Branch", value: String(metadata.branch) });
@@ -232,8 +236,19 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
               ))}
             </div>
 
-            <div className="ml-auto text-sm font-mono">
-              {formatDuration(currentTime)} / {formatDuration(maxOffset)}
+            <div className="ml-auto flex items-center gap-4">
+              {/* Running cost counter */}
+              {(() => {
+                const currentCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+                return currentCost > 0 ? (
+                  <span className="text-sm font-mono font-semibold text-amber-600">
+                    ${currentCost.toFixed(4)}
+                  </span>
+                ) : null;
+              })()}
+              <span className="text-sm font-mono">
+                {formatDuration(currentTime)} / {formatDuration(maxOffset)}
+              </span>
             </div>
           </div>
 
@@ -270,6 +285,9 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
             return sum + (Number(e.metadata?.latency_ms) || 0);
           }, 0);
 
+          // Running cost for this tool at current time
+          const toolCost = toolVisible.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+
           return (
             <Card key={tool} className={`border-l-4 ${TOOL_BORDER_COLORS[tool] || "border-gray-500"}`}>
               <CardContent className="pt-4 pb-4">
@@ -285,6 +303,11 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
                       <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
                         {totalTokens.toLocaleString()} tokens
                         {totalLatency > 0 && ` · ${formatDuration(totalLatency)} LLM time`}
+                      </p>
+                    )}
+                    {toolCost > 0 && (
+                      <p className="text-[10px] font-mono mt-0.5 text-amber-600">
+                        ${toolCost.toFixed(4)} spent
                       </p>
                     )}
                   </div>
@@ -505,6 +528,11 @@ export default function ReplayPage() {
                     <Badge variant={run.status === "completed" ? "default" : "secondary"}>
                       {run.status}
                     </Badge>
+                    {run.total_cost_usd > 0 && (
+                      <span className="text-sm font-mono text-amber-600">
+                        ${run.total_cost_usd.toFixed(2)}
+                      </span>
+                    )}
                     <span className="text-sm text-muted-foreground">
                       {run.tools.length} tools
                     </span>

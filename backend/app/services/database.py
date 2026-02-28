@@ -74,6 +74,7 @@ async def init_db() -> None:
                 file_path TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'running',
                 pr_url TEXT,
+                acus REAL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
@@ -86,7 +87,8 @@ async def init_db() -> None:
                 ended_at TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
                 tools TEXT NOT NULL DEFAULT '[]',
-                branch_name TEXT
+                branch_name TEXT,
+                total_cost_usd REAL NOT NULL DEFAULT 0.0
             );
 
             CREATE TABLE IF NOT EXISTS replay_events (
@@ -98,6 +100,8 @@ async def init_db() -> None:
                 alert_number INTEGER,
                 timestamp_offset_ms INTEGER NOT NULL DEFAULT 0,
                 metadata TEXT NOT NULL DEFAULT '{}',
+                cost_usd REAL NOT NULL DEFAULT 0.0,
+                cumulative_cost_usd REAL NOT NULL DEFAULT 0.0,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -209,6 +213,33 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_repo_alert "
             "ON copilot_autofix_jobs(repo, alert_number)"
         )
+
+        # Add cost columns to replay tables (for existing DBs)
+        cursor = await db.execute("PRAGMA table_info(replay_runs)")
+        rr_all_columns = {row[1] for row in await cursor.fetchall()}
+        if "total_cost_usd" not in rr_all_columns:
+            await db.execute(
+                "ALTER TABLE replay_runs ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0.0"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(replay_events)")
+        re_all_columns = {row[1] for row in await cursor.fetchall()}
+        if "cost_usd" not in re_all_columns:
+            await db.execute(
+                "ALTER TABLE replay_events ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0.0"
+            )
+        if "cumulative_cost_usd" not in re_all_columns:
+            await db.execute(
+                "ALTER TABLE replay_events ADD COLUMN cumulative_cost_usd REAL NOT NULL DEFAULT 0.0"
+            )
+
+        # Add acus column to devin_sessions
+        cursor = await db.execute("PRAGMA table_info(devin_sessions)")
+        ds_all_columns = {row[1] for row in await cursor.fetchall()}
+        if "acus" not in ds_all_columns:
+            await db.execute(
+                "ALTER TABLE devin_sessions ADD COLUMN acus REAL"
+            )
 
         # Migrate devin_sessions: remove UNIQUE constraint on session_id
         # so grouped sessions (multiple alerts per session) can share one id.

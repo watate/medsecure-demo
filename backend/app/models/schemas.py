@@ -108,6 +108,7 @@ class DevinSession(BaseModel):
     file_path: str
     status: str
     pr_url: str | None = None
+    acus: float | None = None
     created_at: str
     updated_at: str
 
@@ -270,6 +271,8 @@ class ReplayEvent(BaseModel):
     alert_number: int | None = None
     timestamp_offset_ms: int
     metadata: dict[str, object] = {}
+    cost_usd: float = 0.0
+    cumulative_cost_usd: float = 0.0
     created_at: str
 
 
@@ -282,6 +285,7 @@ class ReplayRun(BaseModel):
     status: str
     tools: list[str]
     branch_name: str | None = None
+    total_cost_usd: float = 0.0
 
 
 class ReplayRunWithEvents(ReplayRun):

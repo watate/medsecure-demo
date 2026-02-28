@@ -79,6 +79,7 @@ export interface DevinSession {
   file_path: string;
   status: string;
   pr_url: string | null;
+  acus: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -157,6 +158,8 @@ export interface ReplayEvent {
   alert_number: number | null;
   timestamp_offset_ms: number;
   metadata: Record<string, unknown>;
+  cost_usd: number;
+  cumulative_cost_usd: number;
   created_at: string;
 }
 
@@ -169,6 +172,7 @@ export interface ReplayRun {
   status: string;
   tools: string[];
   branch_name: string | null;
+  total_cost_usd: number;
 }
 
 export interface ReplayRunWithEvents extends ReplayRun {
