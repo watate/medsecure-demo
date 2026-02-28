@@ -21,6 +21,8 @@ from app.models.schemas import (
     DevinSession,
     RemediationRequest,
     RemediationResponse,
+    SpotBugsResultsResponse,
+    SpotBugsToolResult,
 )
 from app.services.database import get_db
 from app.services.devin_client import DevinClient
@@ -32,7 +34,11 @@ from app.services.replay_recorder import (
     compute_devin_session_cost,
     compute_llm_call_cost,
 )
-from app.services.repo_resolver import resolve_baseline_branch, resolve_repo
+from app.services.repo_resolver import (
+    get_latest_tool_branches,
+    resolve_baseline_branch,
+    resolve_repo,
+)
 from app.services.token_counter import (
     build_grouped_prompt_for_file,
     build_prompt_for_alert,
@@ -2326,3 +2332,221 @@ async def cancel_benchmark(
         await db.close()
 
     return {"status": "cancelled", "run_id": run_id}
+
+
+# ------------------------------------------------------------------
+# SpotBugs results via GitHub Actions artifacts
+# ------------------------------------------------------------------
+
+SPOTBUGS_WORKFLOW_NAME = "SpotBugs Analysis"
+
+# Stagger between GitHub API calls to avoid secondary rate limits
+_GH_ACTIONS_STAGGER_S = 1.0
+
+
+def _count_bugs_in_xml(xml_content: str) -> int:
+    """Count <BugInstance> elements in SpotBugs XML output."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_content)
+        return len(root.findall(".//BugInstance"))
+    except ET.ParseError:
+        logger.warning("Failed to parse SpotBugs XML; falling back to regex count")
+        import re
+
+        return len(re.findall(r"<BugInstance", xml_content))
+
+
+@router.get("/spotbugs-results", response_model=SpotBugsResultsResponse)
+async def get_spotbugs_results(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+    run_id: int | None = Query(default=None, description="Benchmark run_id to resolve branches from"),
+) -> SpotBugsResultsResponse:
+    """Fetch SpotBugs CI results for each tool's remediation branch.
+
+    For each tool branch we:
+    1. Find the latest "SpotBugs Analysis" workflow run via GitHub Actions API.
+    2. If the run is complete and successful, download the artifact zip and
+       extract the SpotBugs XML report.
+    3. Parse bug counts from the XML and return everything to the frontend.
+
+    If *run_id* is provided, branches are resolved from that benchmark's
+    replay_runs entry.  Otherwise we use ``get_latest_tool_branches``.
+    """
+    resolved_repo = await resolve_repo(repo)
+
+    # Resolve tool → branch mapping
+    if run_id is not None:
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT tools, branch_name FROM replay_runs WHERE id = ?",
+                (run_id,),
+            )
+            row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"No replay run found for run_id={run_id}")
+
+        import json as _json
+
+        try:
+            tools_list: list[str] = _json.loads(row["tools"] or "[]")
+        except Exception:
+            tools_list = []
+
+        # Benchmark runs store a single branch_name for all tools, but each
+        # tool has its own branch of the form remediate/{tool}-bench-{ts}.
+        # We need to look up the branch_name pattern.  The benchmark creates
+        # branches like "remediate/{tool}-bench-{ts}" so we can re-derive them
+        # from the run's branch pattern.
+        branch_name: str | None = row["branch_name"]
+        tool_branches: dict[str, str] = {}
+
+        if branch_name:
+            # Old single-branch runs — all tools share a branch
+            for tool in tools_list:
+                if tool == "baseline":
+                    continue
+                tool_branches[tool] = branch_name
+        else:
+            # Benchmark runs: look up actual per-tool branches from replay_events
+            db2 = await get_db()
+            try:
+                cursor2 = await db2.execute(
+                    "SELECT tool, detail, metadata FROM replay_events "
+                    "WHERE run_id = ? AND event_type IN ('scan_started', 'codeql_ready') "
+                    "ORDER BY id ASC",
+                    (run_id,),
+                )
+                rows2 = await cursor2.fetchall()
+                for r in rows2:
+                    tool_name = r["tool"]
+                    if tool_name == "baseline" or tool_name == "benchmark":
+                        continue
+                    try:
+                        meta = _json.loads(r["metadata"] or "{}")
+                    except Exception:
+                        meta = {}
+                    branch_val = meta.get("branch", "")
+                    if branch_val and tool_name not in tool_branches:
+                        tool_branches[tool_name] = branch_val
+            finally:
+                await db2.close()
+
+        if not tool_branches:
+            # Fallback to latest known branches
+            tool_branches = await get_latest_tool_branches(resolved_repo)
+    else:
+        tool_branches = await get_latest_tool_branches(resolved_repo)
+
+    if not tool_branches:
+        return SpotBugsResultsResponse(
+            repo=resolved_repo,
+            results=[],
+            message="No tool branches found. Run a benchmark first.",
+        )
+
+    # For each tool branch, check GitHub Actions for the SpotBugs workflow
+    github = GitHubClient(repo=resolved_repo)
+    results: list[SpotBugsToolResult] = []
+
+    for i, (tool_name, branch) in enumerate(sorted(tool_branches.items())):
+        if i > 0:
+            await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+
+        try:
+            runs = await github.get_workflow_runs_for_branch(
+                branch, workflow_name=SPOTBUGS_WORKFLOW_NAME, per_page=1,
+            )
+
+            if not runs:
+                results.append(SpotBugsToolResult(
+                    tool=tool_name,
+                    branch=branch,
+                    workflow_status="not_found",
+                    error="No SpotBugs workflow run found for this branch",
+                ))
+                continue
+
+            run = runs[0]
+            status = run["status"]
+            conclusion = run.get("conclusion")
+
+            result = SpotBugsToolResult(
+                tool=tool_name,
+                branch=branch,
+                workflow_status=status,
+                workflow_conclusion=conclusion,
+                workflow_url=run.get("html_url"),
+            )
+
+            # If the run completed successfully, try to download the artifact
+            if status == "completed" and conclusion == "success":
+                await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+                artifacts = await github.get_run_artifacts(run["id"])
+
+                # Find the spotbugs report artifact
+                spotbugs_artifact = None
+                for artifact in artifacts:
+                    if "spotbugs" in artifact["name"].lower():
+                        spotbugs_artifact = artifact
+                        break
+
+                if spotbugs_artifact and not spotbugs_artifact.get("expired"):
+                    await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+                    files = await github.download_artifact_zip(spotbugs_artifact["id"])
+
+                    # Find the XML report file
+                    xml_content: str | None = None
+                    for fname, content in files.items():
+                        if fname.endswith(".xml"):
+                            xml_content = content
+                            break
+
+                    if xml_content:
+                        result.artifact_downloaded = True
+                        result.report_content = xml_content
+                        result.bug_count = _count_bugs_in_xml(xml_content)
+                    else:
+                        # No XML found — return raw file listing
+                        result.artifact_downloaded = True
+                        all_content = "\n\n".join(
+                            f"--- {fname} ---\n{content}"
+                            for fname, content in files.items()
+                        )
+                        result.report_content = all_content
+                elif spotbugs_artifact and spotbugs_artifact.get("expired"):
+                    result.error = "Artifact has expired"
+                else:
+                    result.error = "No SpotBugs artifact found in workflow run"
+
+            elif status == "completed" and conclusion == "failure":
+                result.error = "SpotBugs workflow failed"
+
+            results.append(result)
+
+        except Exception as e:
+            logger.exception("Failed to fetch SpotBugs results for %s/%s", tool_name, branch)
+            results.append(SpotBugsToolResult(
+                tool=tool_name,
+                branch=branch,
+                workflow_status="error",
+                error=str(e)[:500],
+            ))
+
+    # Summary message
+    completed = sum(1 for r in results if r.workflow_status == "completed")
+    running = sum(1 for r in results if r.workflow_status in ("queued", "in_progress"))
+    message = f"{completed}/{len(results)} completed"
+    if running > 0:
+        message += f", {running} still running"
+
+    return SpotBugsResultsResponse(
+        repo=resolved_repo,
+        results=results,
+        message=message,
+    )

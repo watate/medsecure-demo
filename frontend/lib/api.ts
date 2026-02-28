@@ -167,6 +167,25 @@ export interface BenchmarkResponse {
   message: string;
 }
 
+// SpotBugs / GitHub Actions types
+export interface SpotBugsToolResult {
+  tool: string;
+  branch: string;
+  workflow_status: string; // queued, in_progress, completed, not_found, error
+  workflow_conclusion: string | null; // success, failure, cancelled, …
+  workflow_url: string | null;
+  artifact_downloaded: boolean;
+  report_content: string | null;
+  bug_count: number | null;
+  error: string | null;
+}
+
+export interface SpotBugsResultsResponse {
+  repo: string;
+  results: SpotBugsToolResult[];
+  message: string;
+}
+
 // Replay types
 export interface ReplayEvent {
   id: number;
@@ -335,6 +354,12 @@ export const api = {
     fetchApi<{ status: string; run_id: number }>(
       `/api/remediate/benchmark/${runId}/cancel${qs({ repo })}`,
       { method: "POST" },
+    ),
+
+  // SpotBugs Results
+  getSpotBugsResults: (repo?: string | null, runId?: number) =>
+    fetchApi<SpotBugsResultsResponse>(
+      `/api/remediate/spotbugs-results${qs({ repo, run_id: runId })}`,
     ),
 
   // Replay
