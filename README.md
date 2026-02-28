@@ -1,11 +1,20 @@
 # MedSecure
 
-Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs Anthropic vs OpenAI vs Google). Point it at any repo with CodeQL enabled and see which tool fixes the most vulnerabilities.
+Automated CodeQL remediation across AI tools (Devin, Anthropic, OpenAI, Google). Point it at any repo with CodeQL enabled — it creates branches, fixes vulnerabilities, and records every step for replay.
+
+## How It Works
+
+1. **Scan** — Fetches open CodeQL alerts from your repo's `main` branch via GitHub API.
+2. **Branch** — Creates a fresh `remediate/{tool}-{timestamp}` branch from `main` automatically. No manual branch setup needed.
+3. **Group & Fix** — Groups alerts by file so multiple vulnerabilities in the same file are fixed in one pass (one LLM call, one commit per file). Avoids merge conflicts.
+4. **Replay** — Every step is recorded with rich metadata (model, tokens, latency, commit SHAs). The VP of Engineering can play back any run to stakeholders without re-running it.
+
+Supports: **Devin** (autonomous agent sessions), **Anthropic** (Claude), **OpenAI** (GPT), **Google** (Gemini).
 
 ## Architecture
 
-- **Backend**: FastAPI + SQLite — fetches CodeQL alerts via GitHub API, triggers Devin remediation sessions
-- **Frontend**: Next.js + shadcn/ui — dashboard, alert browser, remediation log, reports, replay
+- **Backend**: FastAPI + SQLite — GitHub API integration, LLM orchestration, replay recording
+- **Frontend**: Next.js + shadcn/ui — dashboard, alert browser, remediation log, reports, replay timeline
 - **Auth**: [better-auth](https://www.better-auth.com/) with SQLite — email/password login, session cookies
 - **Infra**: Terraform (EC2 + S3), Docker Compose (Caddy + API + Web), GitHub Actions CI/CD
 
@@ -13,31 +22,18 @@ Compare CodeQL security remediation across AI tools (Devin vs Copilot Autofix vs
 
 ### 1. Prepare your target repo
 
-Enable CodeQL on the repo you want to scan. Update the workflow to scan all branches:
+Enable CodeQL on the repo you want to scan:
 
 1. Repo -> Settings -> Advanced Security 
 2. Find Code scanning → CodeQL analysis and click three dots -> Switch to advanced
-3. Update codeql.yml
+3. Update codeql.yml to scan all branches:
 ```yml
 on:
   push:
     branches: ['**']
 ```
 
-Create branches from `main` for each tool (examples here are for tomcat):
-
-```bash
-git checkout main
-git checkout -b tomcat-devin && git push origin tomcat-devin
-git checkout main
-git checkout -b tomcat-copilot && git push origin tomcat-copilot
-git checkout main
-git checkout -b tomcat-anthropic && git push origin tomcat-anthropic
-git checkout main
-git checkout -b tomcat-openai && git push origin tomcat-openai
-git checkout main
-git checkout -b tomcat-google && git push origin tomcat-google
-```
+> **Note:** You do not need to create branches manually. Remediation runs automatically create a fresh `remediate/{tool}-{timestamp}` branch from `main` via the GitHub API.
 
 ### 2. Create a GitHub PAT
 Go to: [https://github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
@@ -139,12 +135,14 @@ All endpoints except `/api/health` require authentication (better-auth session c
 | GET | `/api/scans` | List scan snapshots |
 | GET | `/api/scans/compare/latest` | Compare latest scan across tools |
 | GET | `/api/alerts/live?tool=baseline` | Live alerts from GitHub API |
-| POST | `/api/remediate/devin` | Create Devin sessions to fix alerts |
+| POST | `/api/remediate/devin` | Fix alerts via Devin (auto-branches, groups by file) |
+| POST | `/api/remediate/api-tool` | Fix alerts via LLM API (anthropic/openai/gemini) |
 | GET | `/api/remediate/devin/sessions` | List Devin sessions |
+| GET | `/api/remediate/api-tool/jobs` | List API remediation jobs |
 | POST | `/api/reports/generate/{type}` | Generate CISO or CTO report |
 | GET | `/api/reports/latest/{type}` | Get latest report by type |
-| GET | `/api/replay/runs` | List replay runs |
-| GET | `/api/replay/runs/{id}` | Get replay run with events |
+| GET | `/api/replay/runs` | List replay runs (includes branch name) |
+| GET | `/api/replay/runs/{id}` | Get replay run with events + metadata |
 | POST | `/api/replay/demo-seed` | Seed demo replay data |
 
 ## Environment Variables
