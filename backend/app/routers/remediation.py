@@ -762,11 +762,14 @@ async def refresh_devin_sessions(
         for row in rows:
             try:
                 status_data = await devin.get_session_status(row["session_id"])
-                new_status = status_data.get("status_enum", "unknown")
-                pr_url = status_data.get("pull_request", {}).get("url") if status_data.get("pull_request") else None
+                # v3 API returns "status" directly (new/claimed/running/exit/error/suspended/resuming)
+                new_status = status_data.get("status", "unknown")
+                # v3 API returns pull_requests as an array of {pr_url, pr_state}
+                prs = status_data.get("pull_requests", [])
+                pr_url = prs[0].get("pr_url") if prs else None
 
-                # Extract ACU usage if available in the response
-                acus = status_data.get("total_acus") or status_data.get("acus")
+                # v3 API returns acus_consumed
+                acus = status_data.get("acus_consumed")
 
                 await db.execute(
                     """UPDATE devin_sessions
@@ -1358,12 +1361,12 @@ async def _benchmark_devin(
     start_time: float | None = None,
 ) -> None:
     """Background task: run Devin remediation and record to shared run."""
-    if not settings.devin_api_key:
+    if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
         await recorder.record(
             tool="devin",
             event_type="error",
-            detail="DEVIN_API_KEY not configured — skipping",
+            detail="DEVIN_API_KEY or DEVIN_ORG_ID not configured — skipping",
         )
         return
 

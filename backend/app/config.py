@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     # Devin API
     devin_api_key: str = ""
     devin_api_base: str = "https://api.devin.ai/v1"
+    devin_org_id: str = ""
 
     # Anthropic API
     anthropic_api_key: str = ""

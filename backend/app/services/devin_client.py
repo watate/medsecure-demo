@@ -5,13 +5,24 @@ from app.models.schemas import Alert
 
 
 class DevinClient:
-    def __init__(self, api_key: str | None = None):
+    """Client for the Devin v3 Organization API.
+
+    Uses /v3beta1/organizations/{org_id}/sessions endpoints.
+    Requires DEVIN_API_KEY (service user credential) and DEVIN_ORG_ID.
+    """
+
+    def __init__(self, api_key: str | None = None, org_id: str | None = None):
         self.api_key = api_key or settings.devin_api_key
-        self.base_url = settings.devin_api_base
+        self.org_id = org_id or settings.devin_org_id
+        self.base_url = "https://api.devin.ai/v3"
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    @property
+    def _sessions_url(self) -> str:
+        return f"{self.base_url}/organizations/{self.org_id}/sessions"
 
     def _build_prompt(self, alert: Alert, repo: str, branch: str) -> str:
         """Build a remediation prompt for Devin."""
@@ -70,11 +81,11 @@ class DevinClient:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{self.base_url}/sessions",
+                self._sessions_url,
                 headers=self.headers,
                 json={
                     "prompt": prompt,
-                    "idempotent": False,
+                    "repos": [repo],
                 },
             )
             response.raise_for_status()
@@ -88,21 +99,25 @@ class DevinClient:
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{self.base_url}/sessions",
+                self._sessions_url,
                 headers=self.headers,
                 json={
                     "prompt": prompt,
-                    "idempotent": False,
+                    "repos": [repo],
                 },
             )
             response.raise_for_status()
             return response.json()
 
     async def get_session_status(self, session_id: str) -> dict:
-        """Get the status of a Devin session."""
+        """Get the status of a Devin session.
+
+        v3 response includes: session_id, status, acus_consumed,
+        pull_requests [{pr_url, pr_state}], url, etc.
+        """
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(
-                f"{self.base_url}/session/{session_id}",
+                f"{self._sessions_url}/{session_id}",
                 headers=self.headers,
             )
             response.raise_for_status()
@@ -112,7 +127,7 @@ class DevinClient:
         """Send a message to an existing Devin session."""
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                f"{self.base_url}/session/{session_id}/message",
+                f"{self._sessions_url}/{session_id}/messages",
                 headers=self.headers,
                 json={"message": message},
             )
