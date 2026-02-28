@@ -759,23 +759,41 @@ async def refresh_devin_sessions(
         )
         rows = await cursor.fetchall()
 
+        if not rows:
+            return {"updated": 0, "total_running": 0}
+
+        # Fetch all org sessions once (includes status_detail) rather
+        # than hitting the single-session endpoint per row.
+        try:
+            all_org_sessions = await devin.list_sessions()
+            org_sessions_by_id = {
+                s["session_id"]: s for s in all_org_sessions
+            }
+        except Exception:
+            logger.exception("Failed to list org sessions, falling back to per-session polling")
+            org_sessions_by_id = {}
+
         for row in rows:
             try:
-                status_data = await devin.get_session_status(row["session_id"])
-                # v3 API returns "status" directly (new/claimed/running/exit/error/suspended/resuming)
-                new_status = status_data.get("status", "unknown")
-                # v3 API returns pull_requests as an array of {pr_url, pr_state}
+                sid = row["session_id"]
+                status_data = org_sessions_by_id.get(sid)
+                if status_data is None:
+                    # Fallback to single-session endpoint
+                    status_data = await devin.get_session_status(sid)
+
+                # Use _is_devin_session_done to also detect waiting_for_user
+                _done, effective_status = _is_devin_session_done(status_data)
+                new_status = effective_status if _done else status_data.get("status", "unknown")
+
                 prs = status_data.get("pull_requests", [])
                 pr_url = prs[0].get("pr_url") if prs else None
-
-                # v3 API returns acus_consumed
                 acus = status_data.get("acus_consumed")
 
                 await db.execute(
                     """UPDATE devin_sessions
                        SET status = ?, pr_url = ?, acus = COALESCE(?, acus), updated_at = datetime('now')
                        WHERE repo = ? AND session_id = ?""",
-                    (new_status, pr_url, acus, row["repo"], row["session_id"]),
+                    (new_status, pr_url, acus, row["repo"], sid),
                 )
                 updated_count += 1
             except Exception:
@@ -1630,7 +1648,17 @@ async def _benchmark_devin(
                 await asyncio.sleep(DEVIN_POLL_INTERVAL)
 
                 try:
-                    status_data = await devin.get_session_status(session_id)
+                    # Use list_sessions endpoint which reliably returns
+                    # status_detail (e.g. "waiting_for_user"); the
+                    # single-session endpoint may omit it.
+                    all_org_sessions = await devin.list_sessions()
+                    status_data = next(
+                        (s for s in all_org_sessions if s.get("session_id") == session_id),
+                        None,
+                    )
+                    if status_data is None:
+                        # Fallback to single-session endpoint
+                        status_data = await devin.get_session_status(session_id)
                     session_done, effective_status = _is_devin_session_done(status_data)
 
                     if session_done:

@@ -163,6 +163,26 @@ class DevinClient:
         )
         return response.json()
 
+    async def list_sessions(self) -> list[dict]:
+        """List all sessions for the organization.
+
+        GET /v3/organizations/{org_id}/sessions
+
+        Returns the ``items`` array from the response. Each item includes
+        ``session_id``, ``status``, ``status_detail``, ``acus_consumed``,
+        ``url``, ``pull_requests``, etc.
+
+        This endpoint reliably exposes ``status_detail`` (e.g.
+        ``"waiting_for_user"``), which the single-session endpoint may omit.
+        """
+        response = await self._request_with_retry(
+            "GET",
+            self._sessions_url,
+            headers=self.headers,
+        )
+        data = response.json()
+        return data.get("items", [])
+
     async def send_message(self, session_id: str, message: str) -> None:
         """Send a message to an existing Devin session."""
         await self._request_with_retry(
