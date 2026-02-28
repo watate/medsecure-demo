@@ -2393,8 +2393,13 @@ async def _run_regression_tests_background(
     tool_branches: dict[str, str],
     test_command: str,
     snapshot_id: str,
+    placeholder_ids: dict[str, int] | None = None,
 ) -> None:
-    """Background task: create Devin sessions for each branch, poll for results."""
+    """Background task: create Devin sessions for each branch, poll for results.
+
+    If *placeholder_ids* is provided (tool -> row id), the task updates existing
+    rows instead of inserting new ones.
+    """
     devin = DevinClient()
     db = await get_db()
 
@@ -2402,6 +2407,7 @@ async def _run_regression_tests_background(
         for tool_name, branch in tool_branches.items():
             prompt = _build_regression_prompt(resolved_repo, branch, test_command)
             title = f"Regression test: {tool_name} ({branch})"
+            row_id = placeholder_ids.get(tool_name) if placeholder_ids else None
 
             try:
                 result = await devin.create_snapshot_session(
@@ -2413,12 +2419,20 @@ async def _run_regression_tests_background(
                 session_url = result.get("url", "")
 
                 now = datetime.now(timezone.utc).isoformat()
-                await db.execute(
-                    """INSERT INTO regression_test_jobs
-                       (repo, tool, branch, session_id, session_url, status, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, 'running', ?, ?)""",
-                    (resolved_repo, tool_name, branch, session_id, session_url, now, now),
-                )
+                if row_id:
+                    await db.execute(
+                        """UPDATE regression_test_jobs
+                           SET session_id = ?, session_url = ?, status = 'running', updated_at = ?
+                           WHERE id = ?""",
+                        (session_id, session_url, now, row_id),
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO regression_test_jobs
+                           (repo, tool, branch, session_id, session_url, status, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?, 'running', ?, ?)""",
+                        (resolved_repo, tool_name, branch, session_id, session_url, now, now),
+                    )
                 await db.commit()
 
                 logger.info(
@@ -2431,13 +2445,21 @@ async def _run_regression_tests_background(
                     tool_name, branch,
                 )
                 now = datetime.now(timezone.utc).isoformat()
-                await db.execute(
-                    """INSERT INTO regression_test_jobs
-                       (repo, tool, branch, session_id, session_url, status,
-                        result_message, created_at, updated_at)
-                       VALUES (?, ?, ?, '', '', 'failed', ?, ?, ?)""",
-                    (resolved_repo, tool_name, branch, str(e)[:500], now, now),
-                )
+                if row_id:
+                    await db.execute(
+                        """UPDATE regression_test_jobs
+                           SET status = 'failed', result_message = ?, updated_at = ?
+                           WHERE id = ?""",
+                        (str(e)[:500], now, row_id),
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO regression_test_jobs
+                           (repo, tool, branch, session_id, session_url, status,
+                            result_message, created_at, updated_at)
+                           VALUES (?, ?, ?, '', '', 'failed', ?, ?, ?)""",
+                        (resolved_repo, tool_name, branch, str(e)[:500], now, now),
+                    )
                 await db.commit()
 
             # Rate-limit-aware stagger between session launches
@@ -2564,13 +2586,31 @@ async def trigger_regression_tests(
             detail="No tool branches found. Run a benchmark first.",
         )
 
-    # Launch background task
+    # Insert placeholder rows synchronously so the frontend can poll immediately
+    now = datetime.now(timezone.utc).isoformat()
+    placeholder_ids: dict[str, int] = {}
+    db = await get_db()
+    try:
+        for tool_name, branch in tool_branches.items():
+            cursor = await db.execute(
+                """INSERT INTO regression_test_jobs
+                   (repo, tool, branch, session_id, session_url, status, created_at, updated_at)
+                   VALUES (?, ?, ?, '', '', 'pending', ?, ?)""",
+                (resolved_repo, tool_name, branch, now, now),
+            )
+            placeholder_ids[tool_name] = cursor.lastrowid  # type: ignore[assignment]
+        await db.commit()
+    finally:
+        await db.close()
+
+    # Launch background task (it will update the placeholder rows)
     background_tasks.add_task(
         _run_regression_tests_background,
         resolved_repo,
         tool_branches,
         request.test_command,
         settings.devin_snapshot_id,
+        placeholder_ids,
     )
 
     return RegressionTestResponse(
