@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     # Google Gemini API
     gemini_api_key: str = ""
 
+    # Remediation batching (applies to all tools)
+    batch_size: int = 10
+
     # Database
     database_path: str = "medsecure.db"
 

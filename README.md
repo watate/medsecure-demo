@@ -158,6 +158,7 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 | `GITHUB_REPO` | Yes | Target repo (e.g. `owner/repo`) |
 | `DEVIN_API_KEY` | For remediation | Devin API key |
 | `AUTH_DB_PATH` | No | Path to better-auth SQLite database (default: `../frontend/auth.db`) |
+| `BATCH_SIZE` | No | Max file groups per batch in remediation (default: `10`) |
 | `CORS_ORIGINS` | No | Allowed origins (default: `http://localhost:3000`) |
 | `BRANCH_BASELINE` | No | Baseline branch (default: `main`) |
 | `DATABASE_PATH` | No | SQLite path (default: `medsecure.db`) |

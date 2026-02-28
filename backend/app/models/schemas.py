@@ -207,7 +207,7 @@ class ApiRemediationRequest(BaseModel):
 
 class CopilotAutofixRequest(BaseModel):
     alert_numbers: list[int]
-    batch_size: int = 10
+    batch_size: int | None = None  # None → use BATCH_SIZE env var
 
 
 class CopilotAutofixJob(BaseModel):
