@@ -333,10 +333,18 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
       const meta = event.metadata || {};
       const sid = meta.session_id as string | undefined;
       if (!sid || seen.has(sid)) {
-        // Update status if we see a session_complete event for a known session
-        if (sid && seen.has(sid) && event.event_type === "session_complete") {
+        // Update status if we see a terminal event for a known session
+        if (sid && seen.has(sid) && (event.event_type === "session_complete" || event.event_type === "cancelled" || event.event_type === "polling_timeout")) {
           const existing = sessions.find((s) => s.id === sid);
-          if (existing) existing.status = String(meta.status ?? "done");
+          if (existing) {
+            if (event.event_type === "session_complete") {
+              existing.status = String(meta.status ?? "done");
+            } else if (event.event_type === "cancelled") {
+              existing.status = "cancelled";
+            } else if (event.event_type === "polling_timeout") {
+              existing.status = "timeout";
+            }
+          }
         }
         continue;
       }
@@ -552,7 +560,7 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                   <div className="flex-1 min-w-0">
                     <p className="font-mono text-xs truncate">{session.filePath}</p>
                     <p className="text-[10px] text-muted-foreground">
-                      {session.status === "running" ? "In progress..." : session.status}
+                      {session.status === "running" ? "In progress..." : session.status === "timeout" ? "Timed out" : session.status === "cancelled" ? "Cancelled" : session.status}
                     </p>
                   </div>
                   <a
