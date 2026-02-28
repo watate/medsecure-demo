@@ -186,7 +186,7 @@ export default function ReposPage() {
               {search ? "No repos match your search" : "No repos found"}
             </p>
           ) : (
-            <div className="divide-y divide-border max-h-[500px] overflow-y-auto">
+            <div className="divide-y divide-border max-h-[500px] overflow-y-auto pr-2">
               {filteredAvailable.map((repo) => {
                 const isTracked = trackedNames.has(repo.full_name);
                 const isAdding = adding === repo.full_name;
