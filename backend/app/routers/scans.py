@@ -389,7 +389,6 @@ async def compare_latest(
     tools = {k: v for k, v in scan.branches.items() if k != "baseline"}
 
     improvements: dict[str, dict[str, int | float]] = {}
-    cost_estimates: dict[str, CostEstimate] = {}
     for tool_name, tool_summary in tools.items():
         improvements[tool_name] = {
             "total_fixed": baseline.open - tool_summary.open,
@@ -400,7 +399,11 @@ async def compare_latest(
             "fix_rate_pct": round((1 - tool_summary.open / baseline.open) * 100, 1) if baseline.open > 0 else 0.0,
         }
 
-        # Pre-remediation cost estimate for all tools
+    # Pre-remediation cost estimates for ALL 5 standard tools (based on
+    # baseline data — does not require tool branches to exist).
+    cost_estimates: dict[str, CostEstimate] = {}
+    ALL_TOOLS = ["devin", "copilot", "anthropic", "openai", "gemini"]
+    for tool_name in ALL_TOOLS:
         if tool_name in ("anthropic", "openai", "gemini"):
             # Token-based pricing for API tools
             cost_data = _estimate_api_cost(tool_name, baseline.open, baseline.estimated_prompt_tokens)

@@ -268,6 +268,21 @@ class ApiRemediationResponse(BaseModel):
     message: str
 
 
+# --- Benchmark schemas ---
+
+
+class BenchmarkRequest(BaseModel):
+    severities: list[str] = ["critical", "high", "medium", "low"]
+
+
+class BenchmarkResponse(BaseModel):
+    run_id: int
+    alert_count: int
+    severity_counts: dict[str, int]
+    tools: list[str]
+    message: str
+
+
 # --- Replay schemas ---
 
 

@@ -12,6 +12,8 @@ export interface BranchSummary {
   medium: number;
   low: number;
   other: number;
+  estimated_prompt_tokens: number;
+  unique_file_count: number;
 }
 
 export interface ScanSnapshot {
@@ -154,6 +156,15 @@ export interface ReportHistoryItem {
   scan_id: number;
   report_type: string;
   created_at: string;
+}
+
+// Benchmark types
+export interface BenchmarkResponse {
+  run_id: number;
+  alert_count: number;
+  severity_counts: Record<string, number>;
+  tools: string[];
+  message: string;
 }
 
 // Replay types
@@ -313,6 +324,13 @@ export const api = {
   listReports: (reportType?: string, repo?: string | null) => {
     return fetchApi<ReportHistoryItem[]>(`/api/reports/history${qs({ report_type: reportType, repo })}`);
   },
+
+  // Benchmark
+  triggerBenchmark: (severities: string[], repo?: string | null) =>
+    fetchApi<BenchmarkResponse>(`/api/remediate/benchmark${qs({ repo })}`, {
+      method: "POST",
+      body: JSON.stringify({ severities }),
+    }),
 
   // Replay
   listReplayRuns: (repo?: string | null) =>

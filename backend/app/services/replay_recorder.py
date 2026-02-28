@@ -87,6 +87,29 @@ class ReplayRecorder:
         self._start_time: float = 0.0
         self._cumulative_cost: float = 0.0
 
+    @classmethod
+    async def attach(
+        cls,
+        run_id: int,
+        tools: list[str] | None = None,
+        repo: str = "",
+        start_time: float | None = None,
+    ) -> "ReplayRecorder":
+        """Attach to an existing replay run (e.g. for benchmark with shared run).
+
+        Unlike ``start()``, this does NOT create a new DB row — it simply
+        sets the recorder to write events against the given ``run_id``.
+
+        ``start_time`` should be a ``time.monotonic()`` value captured once
+        by the orchestrator so that all concurrent recorders sharing a run
+        compute consistent ``timestamp_offset_ms`` values.
+        """
+        recorder = cls(tools=tools or [], repo=repo)
+        recorder.run_id = run_id
+        recorder._start_time = start_time if start_time is not None else time.monotonic()
+        recorder._cumulative_cost = 0.0
+        return recorder
+
     async def start(self) -> int:
         """Create a replay run and start the clock. Returns the run_id."""
         now = datetime.now(timezone.utc).isoformat()
@@ -160,10 +183,10 @@ class ReplayRecorder:
             )
             event_id = cursor.lastrowid
 
-            # Update the run's total cost
+            # Update the run's total cost atomically (safe for concurrent recorders)
             await db.execute(
-                "UPDATE replay_runs SET total_cost_usd = ? WHERE id = ?",
-                (round(self._cumulative_cost, 6), self.run_id),
+                "UPDATE replay_runs SET total_cost_usd = total_cost_usd + ? WHERE id = ?",
+                (round(cost_usd, 6), self.run_id),
             )
 
             await db.commit()
@@ -187,8 +210,8 @@ class ReplayRecorder:
         db = await get_db()
         try:
             await db.execute(
-                "UPDATE replay_runs SET status = ?, ended_at = ?, total_cost_usd = ? WHERE id = ?",
-                (status, now, round(self._cumulative_cost, 6), self.run_id),
+                "UPDATE replay_runs SET status = ?, ended_at = ? WHERE id = ?",
+                (status, now, self.run_id),
             )
             await db.commit()
             logger.info(

@@ -1,7 +1,11 @@
+import asyncio
+import json
 import logging
+import time as _time
 from collections import defaultdict
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 
 from app.config import settings
 from app.models.schemas import (
@@ -9,6 +13,8 @@ from app.models.schemas import (
     ApiRemediationJob,
     ApiRemediationRequest,
     ApiRemediationResponse,
+    BenchmarkRequest,
+    BenchmarkResponse,
     CopilotAutofixJob,
     CopilotAutofixRequest,
     CopilotAutofixResponse,
@@ -1135,3 +1141,585 @@ async def trigger_copilot_remediation(
         raise
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Benchmark — run ALL tools simultaneously
+# ---------------------------------------------------------------------------
+
+ALL_TOOLS = ["devin", "copilot", "anthropic", "openai", "gemini"]
+
+INTER_TOOL_DELAY = 1.0  # seconds between launching tool tasks (rate-limit friendly)
+
+
+async def _benchmark_api_tool(
+    tool: str,
+    run_id: int,
+    alerts: list[Alert],
+    resolved_repo: str,
+    baseline_branch: str,
+    start_time: float | None = None,
+) -> None:
+    """Background task: run API-tool remediation and record to shared run."""
+    key_attr = _API_TOOL_CONFIG.get(tool)
+    if not key_attr or not getattr(settings, key_attr, None):
+        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
+        await recorder.record(
+            tool=tool,
+            event_type="error",
+            detail=f"{tool} API key not configured — skipping",
+        )
+        return
+
+    github = GitHubClient(repo=resolved_repo)
+    branch_name = f"remediate/{tool}-bench-{int(_time.time())}"
+
+    try:
+        await github.create_branch(branch_name, from_branch=baseline_branch)
+    except Exception as e:
+        recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
+        await recorder.record(
+            tool=tool,
+            event_type="error",
+            detail=f"Failed to create branch {branch_name}: {e}",
+        )
+        return
+
+    file_groups = _group_alerts_by_file(alerts)
+
+    recorder = await ReplayRecorder.attach(run_id, [tool], resolved_repo, start_time=start_time)
+    await recorder.record(
+        tool=tool,
+        event_type="scan_started",
+        detail=(
+            f"Starting {tool} remediation for {len(alerts)} alerts "
+            f"across {len(file_groups)} files on {branch_name}"
+        ),
+        metadata={
+            "repo": resolved_repo,
+            "branch": branch_name,
+            "source_branch": baseline_branch,
+            "alert_count": len(alerts),
+            "file_count": len(file_groups),
+            "tool": tool,
+        },
+    )
+
+    db = await get_db()
+    completed = 0
+    failed = 0
+
+    try:
+        for file_path, file_alerts in file_groups.items():
+            try:
+                await recorder.record(
+                    tool=tool,
+                    event_type="alert_triaged",
+                    detail=f"Fetching {file_path} for {len(file_alerts)} alert(s)",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "file_path": file_path,
+                        "alert_count": len(file_alerts),
+                        "alert_numbers": [a.number for a in file_alerts],
+                    },
+                )
+                file_content = await github.get_file_content(file_path, branch_name)
+
+                # Build prompt
+                if len(file_alerts) == 1:
+                    alert = file_alerts[0]
+                    prompt = build_prompt_for_alert(
+                        alert_rule_id=alert.rule_id,
+                        alert_severity=alert.severity,
+                        alert_rule_description=alert.rule_description,
+                        alert_message=alert.message,
+                        alert_file_path=alert.file_path,
+                        alert_start_line=alert.start_line,
+                        alert_end_line=alert.end_line,
+                        file_content=file_content,
+                    )
+                else:
+                    prompt = build_grouped_prompt_for_file(
+                        file_path=file_path,
+                        file_content=file_content,
+                        alerts=[
+                            {
+                                "rule_id": a.rule_id,
+                                "severity": a.severity,
+                                "rule_description": a.rule_description,
+                                "message": a.message,
+                                "start_line": a.start_line,
+                                "end_line": a.end_line,
+                            }
+                            for a in file_alerts
+                        ],
+                    )
+
+                prompt_tokens = count_tokens(prompt)
+                await recorder.record(
+                    tool=tool,
+                    event_type="api_call_sent",
+                    detail=f"Sending {len(file_alerts)} alert(s) for {file_path} to {tool}",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "prompt_tokens": prompt_tokens,
+                        "file_path": file_path,
+                        "alert_count": len(file_alerts),
+                    },
+                )
+
+                llm_result = await call_llm_with_delay(tool, prompt)
+
+                if not llm_result.extracted_code or not llm_result.extracted_code.strip():
+                    raise ValueError("LLM returned empty response")
+
+                call_cost = compute_llm_call_cost(
+                    tool, llm_result.input_tokens, llm_result.output_tokens,
+                )
+
+                await recorder.record(
+                    tool=tool,
+                    event_type="patch_generated",
+                    detail=f"{llm_result.model} generated fix for {len(file_alerts)} alert(s) in {file_path}",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "model": llm_result.model,
+                        "latency_ms": llm_result.latency_ms,
+                        "input_tokens": llm_result.input_tokens,
+                        "output_tokens": llm_result.output_tokens,
+                        "file_path": file_path,
+                    },
+                    cost_usd=call_cost,
+                )
+
+                # Commit fix
+                alert_refs = ", ".join(f"#{a.number}" for a in file_alerts)
+                commit_msg = (
+                    f"fix: remediate {len(file_alerts)} alert(s) "
+                    f"({alert_refs}) in {file_path} via {tool}"
+                )
+                commit_sha = await github.update_file_content(
+                    path=file_path,
+                    new_content=llm_result.extracted_code,
+                    branch=branch_name,
+                    commit_message=commit_msg,
+                )
+
+                await recorder.record(
+                    tool=tool,
+                    event_type="patch_applied",
+                    detail=f"Patch committed to {branch_name} for {file_path}",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "commit_sha": commit_sha,
+                        "branch": branch_name,
+                        "file_path": file_path,
+                    },
+                )
+                completed += len(file_alerts)
+
+            except Exception as e:
+                logger.exception("Benchmark %s: failed to remediate %s", tool, file_path)
+                await recorder.record(
+                    tool=tool,
+                    event_type="error",
+                    detail=f"Failed to remediate {file_path}: {str(e)[:200]}",
+                    alert_number=file_alerts[0].number,
+                    metadata={"error": str(e)[:500], "file_path": file_path},
+                )
+                failed += len(file_alerts)
+
+        await recorder.record(
+            tool=tool,
+            event_type="remediation_complete",
+            detail=(
+                f"{tool} complete: {completed} fixed, {failed} failed "
+                f"out of {len(alerts)} alerts"
+            ),
+            metadata={
+                "completed": completed,
+                "failed": failed,
+                "total_alerts": len(alerts),
+                "tool": tool,
+                "branch": branch_name,
+            },
+        )
+    except Exception:
+        logger.exception("Benchmark %s task failed", tool)
+    finally:
+        await db.close()
+
+
+async def _benchmark_devin(
+    run_id: int,
+    alerts: list[Alert],
+    resolved_repo: str,
+    baseline_branch: str,
+    start_time: float | None = None,
+) -> None:
+    """Background task: run Devin remediation and record to shared run."""
+    if not settings.devin_api_key:
+        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
+        await recorder.record(
+            tool="devin",
+            event_type="error",
+            detail="DEVIN_API_KEY not configured — skipping",
+        )
+        return
+
+    github = GitHubClient(repo=resolved_repo)
+    devin = DevinClient()
+    branch_name = f"remediate/devin-bench-{int(_time.time())}"
+
+    try:
+        await github.create_branch(branch_name, from_branch=baseline_branch)
+    except Exception as e:
+        recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
+        await recorder.record(
+            tool="devin",
+            event_type="error",
+            detail=f"Failed to create branch {branch_name}: {e}",
+        )
+        return
+
+    file_groups = _group_alerts_by_file(alerts)
+
+    recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
+    await recorder.record(
+        tool="devin",
+        event_type="scan_started",
+        detail=(
+            f"Starting Devin remediation for {len(alerts)} alerts "
+            f"across {len(file_groups)} files on {branch_name}"
+        ),
+        metadata={
+            "repo": resolved_repo,
+            "branch": branch_name,
+            "alert_count": len(alerts),
+            "file_count": len(file_groups),
+        },
+    )
+
+    db = await get_db()
+    sessions_created = 0
+
+    try:
+        for file_path, file_alerts in file_groups.items():
+            try:
+                await recorder.record(
+                    tool="devin",
+                    event_type="session_created",
+                    detail=f"Creating Devin session for {len(file_alerts)} alert(s) in {file_path}",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "file_path": file_path,
+                        "alert_count": len(file_alerts),
+                        "alert_numbers": [a.number for a in file_alerts],
+                        "branch": branch_name,
+                    },
+                )
+
+                if len(file_alerts) == 1:
+                    result = await devin.create_remediation_session(
+                        file_alerts[0], resolved_repo, branch_name,
+                    )
+                else:
+                    result = await devin.create_grouped_session(
+                        file_alerts, resolved_repo, branch_name,
+                    )
+                session_id = result.get("session_id", "")
+
+                for alert in file_alerts:
+                    await db.execute(
+                        """INSERT INTO devin_sessions
+                           (repo, session_id, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, ?, 'running')""",
+                        (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
+                    )
+                await db.commit()
+
+                await recorder.record(
+                    tool="devin",
+                    event_type="analyzing",
+                    detail=f"Devin session {session_id} started for {len(file_alerts)} alert(s) in {file_path}",
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "session_id": session_id,
+                        "file_path": file_path,
+                        "branch": branch_name,
+                    },
+                )
+                sessions_created += 1
+
+            except Exception as e:
+                logger.exception("Benchmark devin: failed for %s", file_path)
+                await recorder.record(
+                    tool="devin",
+                    event_type="error",
+                    detail=f"Failed to create session for {file_path}: {str(e)[:200]}",
+                    alert_number=file_alerts[0].number,
+                    metadata={"error": str(e)[:500], "file_path": file_path},
+                )
+
+        await recorder.record(
+            tool="devin",
+            event_type="remediation_complete",
+            detail=(
+                f"Devin: created {sessions_created} session(s) for "
+                f"{len(alerts)} alerts across {len(file_groups)} files"
+            ),
+            metadata={
+                "sessions_created": sessions_created,
+                "total_alerts": len(alerts),
+                "file_count": len(file_groups),
+                "branch": branch_name,
+            },
+        )
+    except Exception:
+        logger.exception("Benchmark devin task failed")
+    finally:
+        await db.close()
+
+
+async def _benchmark_copilot(
+    run_id: int,
+    alerts: list[Alert],
+    resolved_repo: str,
+    baseline_branch: str,
+    start_time: float | None = None,
+) -> None:
+    """Background task: run Copilot Autofix and record to shared run."""
+    github = GitHubClient(repo=resolved_repo)
+    branch_name = f"remediate/copilot-bench-{int(_time.time())}"
+
+    try:
+        await github.create_branch(branch_name, from_branch=baseline_branch)
+    except Exception as e:
+        recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo, start_time=start_time)
+        await recorder.record(
+            tool="copilot",
+            event_type="error",
+            detail=f"Failed to create branch {branch_name}: {e}",
+        )
+        return
+
+    recorder = await ReplayRecorder.attach(run_id, ["copilot"], resolved_repo, start_time=start_time)
+    await recorder.record(
+        tool="copilot",
+        event_type="scan_started",
+        detail=f"Starting Copilot Autofix for {len(alerts)} alerts on {branch_name}",
+        metadata={
+            "repo": resolved_repo,
+            "branch": branch_name,
+            "alert_count": len(alerts),
+        },
+    )
+
+    db = await get_db()
+    completed = 0
+    failed = 0
+
+    try:
+        for idx, alert in enumerate(alerts):
+            # Rate limiting between triggers
+            if idx > 0:
+                await asyncio.sleep(COPILOT_INTER_ALERT_DELAY)
+
+            try:
+                await recorder.record(
+                    tool="copilot",
+                    event_type="autofix_triggered",
+                    detail=f"Triggering Copilot Autofix for alert #{alert.number} ({alert.rule_id})",
+                    alert_number=alert.number,
+                    metadata={
+                        "rule_id": alert.rule_id,
+                        "file_path": alert.file_path,
+                        "severity": alert.severity,
+                    },
+                    cost_usd=COPILOT_COST_PER_REQUEST,
+                )
+
+                autofix = await github.poll_autofix(alert.number)
+                autofix_status = autofix.get("status", "unknown")
+
+                if autofix_status == "succeeded":
+                    commit_msg = (
+                        f"fix: Copilot Autofix for alert #{alert.number} "
+                        f"({alert.rule_id}) in {alert.file_path}"
+                    )
+                    commit_result = await github.commit_autofix(
+                        alert.number, branch_name, commit_msg,
+                    )
+                    commit_sha = commit_result.get("sha", "")
+
+                    await recorder.record(
+                        tool="copilot",
+                        event_type="patch_applied",
+                        detail=f"Copilot fix committed for alert #{alert.number}",
+                        alert_number=alert.number,
+                        metadata={
+                            "commit_sha": commit_sha,
+                            "branch": branch_name,
+                            "file_path": alert.file_path,
+                        },
+                    )
+                    completed += 1
+                else:
+                    await recorder.record(
+                        tool="copilot",
+                        event_type="autofix_result",
+                        detail=f"Autofix for alert #{alert.number}: {autofix_status}",
+                        alert_number=alert.number,
+                        metadata={"autofix_status": autofix_status},
+                    )
+                    failed += 1
+
+            except Exception as e:
+                logger.exception("Benchmark copilot: failed for alert #%d", alert.number)
+                await recorder.record(
+                    tool="copilot",
+                    event_type="error",
+                    detail=f"Failed autofix for alert #{alert.number}: {str(e)[:200]}",
+                    alert_number=alert.number,
+                    metadata={"error": str(e)[:500]},
+                )
+                failed += 1
+
+        await recorder.record(
+            tool="copilot",
+            event_type="remediation_complete",
+            detail=f"Copilot complete: {completed} fixed, {failed} failed out of {len(alerts)} alerts",
+            metadata={
+                "completed": completed,
+                "failed": failed,
+                "total_alerts": len(alerts),
+                "branch": branch_name,
+            },
+        )
+    except Exception:
+        logger.exception("Benchmark copilot task failed")
+    finally:
+        await db.close()
+
+
+async def _run_benchmark_tasks(
+    run_id: int,
+    alerts: list[Alert],
+    resolved_repo: str,
+    baseline_branch: str,
+    tools: list[str],
+) -> None:
+    """Orchestrate all benchmark tool tasks with rate-limit-aware staggering."""
+    # Capture a single reference time so all tool recorders compute consistent
+    # timestamp_offset_ms values relative to the same start.
+    import time as _time_mod
+    run_start_time = _time_mod.monotonic()
+
+    tasks: list[asyncio.Task[None]] = []
+
+    for i, tool in enumerate(tools):
+        # Stagger tool launches to be rate-limit friendly
+        if i > 0:
+            await asyncio.sleep(INTER_TOOL_DELAY)
+
+        if tool == "devin":
+            task = asyncio.create_task(
+                _benchmark_devin(run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
+            )
+        elif tool == "copilot":
+            task = asyncio.create_task(
+                _benchmark_copilot(run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
+            )
+        elif tool in _API_TOOL_CONFIG:
+            task = asyncio.create_task(
+                _benchmark_api_tool(tool, run_id, alerts, resolved_repo, baseline_branch, start_time=run_start_time)
+            )
+        else:
+            continue
+        tasks.append(task)
+
+    # Wait for all tools to finish
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Mark the shared run as completed
+    db = await get_db()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        await db.execute(
+            "UPDATE replay_runs SET status = 'completed', ended_at = ? WHERE id = ?",
+            (now, run_id),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+@router.post("/benchmark", response_model=BenchmarkResponse)
+async def trigger_benchmark(
+    request: BenchmarkRequest,
+    background_tasks: BackgroundTasks,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> BenchmarkResponse:
+    """Launch a benchmark that runs ALL remediation tools on filtered alerts.
+
+    Alerts are filtered by the requested severities (default: all).
+    A shared replay run is created so the frontend can poll for live progress.
+    Each tool runs as a background task with its own branch.
+    """
+    resolved_repo = await resolve_repo(repo)
+    baseline_branch = await resolve_baseline_branch(resolved_repo)
+
+    github = GitHubClient(repo=resolved_repo)
+    all_alerts = await github.get_alerts(baseline_branch, state="open")
+
+    # Filter by selected severities
+    severity_set = set(s.lower() for s in request.severities)
+    alerts = [a for a in all_alerts if a.severity.lower() in severity_set]
+
+    if not alerts:
+        raise HTTPException(
+            status_code=404,
+            detail="No open alerts matching the selected severities.",
+        )
+
+    # Count alerts per severity
+    severity_counts: dict[str, int] = {}
+    for a in alerts:
+        sev = a.severity.lower()
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    # Determine which tools to run
+    tools = list(ALL_TOOLS)
+
+    # Create the shared replay run
+    now = datetime.now(timezone.utc).isoformat()
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "INSERT INTO replay_runs"
+            " (repo, scan_id, started_at, status, tools, total_cost_usd)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (resolved_repo, None, now, "running", json.dumps(tools), 0.0),
+        )
+        run_id = cursor.lastrowid
+        assert run_id is not None
+        await db.commit()
+    finally:
+        await db.close()
+
+    # Launch all tool tasks in the background
+    background_tasks.add_task(
+        _run_benchmark_tasks, run_id, alerts, resolved_repo, baseline_branch, tools
+    )
+
+    return BenchmarkResponse(
+        run_id=run_id,
+        alert_count=len(alerts),
+        severity_counts=severity_counts,
+        tools=tools,
+        message=(
+            f"Benchmark started: {len(alerts)} alerts across {len(tools)} tools. "
+            f"Track progress at run_id={run_id}."
+        ),
+    )
