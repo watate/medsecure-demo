@@ -40,11 +40,13 @@ GEMINI_MODEL = "gemini-3.1-pro-preview"
 
 # API endpoints
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
-OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_API_URL = "https://api.openai.com/v1/responses"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Timeout for LLM API calls (generous — large files can take a while)
-LLM_TIMEOUT = 120.0
+# Timeout for LLM API calls — large files can take several minutes to process.
+# Use a longer read timeout since LLMs may take a while to generate a response,
+# while connect/write/pool timeouts stay shorter.
+LLM_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 
 # Delay between sequential API calls (seconds) to avoid rate limits
 INTER_CALL_DELAY = 2.0
@@ -109,7 +111,7 @@ async def call_anthropic(prompt: str) -> LLMResult:
 
 
 async def call_openai(prompt: str) -> LLMResult:
-    """Call OpenAI Chat Completions API and return a rich result."""
+    """Call OpenAI Responses API and return a rich result."""
     if not settings.openai_api_key:
         raise ValueError("OPENAI_API_KEY not configured")
 
@@ -123,8 +125,7 @@ async def call_openai(prompt: str) -> LLMResult:
             },
             json={
                 "model": OPENAI_MODEL,
-                "max_tokens": 16384,
-                "messages": [{"role": "user", "content": prompt}],
+                "input": prompt,
             },
         )
         response.raise_for_status()
@@ -132,11 +133,19 @@ async def call_openai(prompt: str) -> LLMResult:
 
     latency_ms = int((time.monotonic() - start) * 1000)
 
-    choices = data.get("choices", [])
-    if not choices:
-        raise ValueError("OpenAI returned no choices")
+    # Responses API returns output as an array of items
+    output_items = data.get("output", [])
+    text_parts: list[str] = []
+    for item in output_items:
+        if item.get("type") == "message":
+            for content_block in item.get("content", []):
+                if content_block.get("type") == "output_text":
+                    text_parts.append(content_block.get("text", ""))
+    raw_text = "\n".join(text_parts)
 
-    raw_text = choices[0].get("message", {}).get("content", "")
+    if not raw_text:
+        raise ValueError("OpenAI Responses API returned no text output")
+
     usage = data.get("usage", {})
 
     return LLMResult(
@@ -145,8 +154,8 @@ async def call_openai(prompt: str) -> LLMResult:
         extracted_code=_extract_code_from_response(raw_text),
         raw_response_text=raw_text,
         latency_ms=latency_ms,
-        input_tokens=usage.get("prompt_tokens"),
-        output_tokens=usage.get("completion_tokens"),
+        input_tokens=usage.get("input_tokens"),
+        output_tokens=usage.get("output_tokens"),
         prompt_preview=prompt[:500],
     )
 

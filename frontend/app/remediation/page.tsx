@@ -69,6 +69,10 @@ const EVENT_ICONS: Record<string, string> = {
   autofix_triggered: "\ud83e\udd16",
   autofix_result: "\ud83d\udcca",
   error: "\u274c",
+  cancelled: "\ud83d\uded1",
+  codeql_waiting: "\u23f3",
+  codeql_ready: "\u2705",
+  codeql_timeout: "\u26a0\ufe0f",
 };
 
 const SEVERITY_CONFIG = [
@@ -316,11 +320,12 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
   const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
 
   // Determine tool completion status
-  const toolStatus = (tool: string): "running" | "completed" | "error" | "waiting" => {
+  const toolStatus = (tool: string): "running" | "completed" | "error" | "waiting" | "cancelled" => {
     const toolEvents = eventsByTool[tool] || [];
     if (toolEvents.length === 0) return "waiting";
     const last = toolEvents[toolEvents.length - 1];
     if (last.event_type === "remediation_complete") return "completed";
+    if (last.event_type === "cancelled") return "cancelled";
     if (last.event_type === "error" && toolEvents.length <= 2) return "error";
     return "running";
   };
@@ -341,6 +346,8 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
             <div className="flex items-center gap-3">
               {isLive ? (
                 <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
+              ) : run.status === "cancelled" ? (
+                <Badge className="bg-amber-500 text-white">Cancelled</Badge>
               ) : (
                 <Badge variant="secondary">Completed</Badge>
               )}
@@ -398,6 +405,9 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                       )}
                       {status === "error" && (
                         <span className="text-xs text-destructive">\u2717</span>
+                      )}
+                      {status === "cancelled" && (
+                        <span className="text-xs text-amber-600">{"\u23f9"}</span>
                       )}
                     </div>
                     <p className="text-xs text-muted-foreground mt-0.5 truncate">
@@ -615,9 +625,9 @@ export default function RemediationPage() {
 
     const poll = async () => {
       try {
-        const data = await api.getReplayRun(runId);
+        const data = await api.getReplayRun(runId, selectedRepo);
         setLiveRun(data);
-        if (data.status === "completed" || data.status === "failed") {
+        if (data.status === "completed" || data.status === "failed" || data.status === "cancelled") {
           setBenchmarkRunning(false);
           if (pollRef.current) {
             clearInterval(pollRef.current);
@@ -641,7 +651,7 @@ export default function RemediationPage() {
         pollRef.current = null;
       }
     };
-  }, [runId]);
+  }, [runId, selectedRepo]);
 
   // Toggle severity checkbox
   const toggleSeverity = (severity: string) => {
@@ -709,7 +719,11 @@ export default function RemediationPage() {
           <h1 className="text-2xl font-bold tracking-tight">Remediation Benchmark</h1>
           <p className="text-muted-foreground mt-1">
             {setupCollapsed
-              ? `Running ${filteredAlertCount} alerts across 5 tools`
+              ? benchmarkRunning
+                ? `Running ${filteredAlertCount} alerts across 5 tools`
+                : liveRun?.status === "cancelled"
+                  ? "Benchmark was cancelled"
+                  : `Completed ${filteredAlertCount} alerts across 5 tools`
               : "Select alert severities and run all remediation tools simultaneously."}
           </p>
         </div>
@@ -717,6 +731,31 @@ export default function RemediationPage() {
           <div className="flex items-center gap-2">
             {benchmarkRunning && (
               <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
+            )}
+            {benchmarkRunning && runId != null && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={async () => {
+                  try {
+                    await api.cancelBenchmark(runId, selectedRepo);
+                    // Stop polling and mark as not running, but keep the
+                    // replay view visible so the user sees the cancelled state.
+                    setBenchmarkRunning(false);
+                    if (pollRef.current) {
+                      clearInterval(pollRef.current);
+                      pollRef.current = null;
+                    }
+                    // Do one final fetch to get the updated status
+                    const updated = await api.getReplayRun(runId, selectedRepo);
+                    setLiveRun(updated);
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : "Failed to cancel benchmark");
+                  }
+                }}
+              >
+                Stop Benchmark
+              </Button>
             )}
             <Button variant="outline" size="sm" onClick={() => setSetupCollapsed(false)}>
               Show Setup
