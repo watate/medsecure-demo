@@ -543,6 +543,8 @@ function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boo
                       </span>
                     ) : session.status === "error" || session.status === "suspended" ? (
                       <span className="inline-flex h-2.5 w-2.5 rounded-full bg-red-500" />
+                    ) : session.status === "timeout" || session.status === "cancelled" ? (
+                      <span className="inline-flex h-2.5 w-2.5 rounded-full bg-amber-500" />
                     ) : (
                       <span className="inline-flex h-2.5 w-2.5 rounded-full bg-emerald-500" />
                     )}

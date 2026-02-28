@@ -1574,6 +1574,17 @@ async def _benchmark_devin(
 
             while not session_done:
                 if cancel_event and cancel_event.is_set():
+                    # Update tracker and DB so session doesn't stay 'running'
+                    for s in all_sessions:
+                        if s["session_id"] == session_id:
+                            s["status"] = "cancelled"
+                    await db.execute(
+                        """UPDATE devin_sessions
+                           SET status = 'cancelled', updated_at = datetime('now')
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
+                    )
+                    await db.commit()
                     await recorder.record(
                         tool="devin",
                         event_type="cancelled",
@@ -1588,6 +1599,17 @@ async def _benchmark_devin(
                         "Benchmark %d: Devin session %s timed out after %.0fs",
                         run_id, session_id, elapsed,
                     )
+                    # Update tracker and DB so session doesn't stay 'running'
+                    for s in all_sessions:
+                        if s["session_id"] == session_id:
+                            s["status"] = "timeout"
+                    await db.execute(
+                        """UPDATE devin_sessions
+                           SET status = 'timeout', updated_at = datetime('now')
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
+                    )
+                    await db.commit()
                     await recorder.record(
                         tool="devin",
                         event_type="polling_timeout",
