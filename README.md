@@ -172,3 +172,9 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 | `BETTER_AUTH_URL` | Yes | Base URL of the frontend (e.g. `http://localhost:3000`) |
 | `NEXT_PUBLIC_API_URL` | No | Backend API URL (default: `http://localhost:8000`) |
 
+# References
+- Devin pricing: [https://devin.ai/pricing](https://devin.ai/pricing)
+- Pricing for Copilot Autofix cost estimation (3x multiplier for paid plans for Claude Opus 4.6): [https://docs.github.com/en/copilot/concepts/billing/copilot-requests](https://docs.github.com/en/copilot/concepts/billing/copilot-requests)
+- Anthropic model pricing: [https://platform.claude.com/docs/en/about-claude/models/overview](https://platform.claude.com/docs/en/about-claude/models/overview)
+- GPT-5.3-Codex pricing: [https://developers.openai.com/api/docs/models/gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex)
+- gemini-3.1-pro-preview pricing: [https://ai.google.dev/gemini-api/docs/pricing](https://ai.google.dev/gemini-api/docs/pricing)
