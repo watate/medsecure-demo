@@ -24,9 +24,6 @@ class Settings(BaseSettings):
     # Google Gemini API
     gemini_api_key: str = ""
 
-    # Devin machine snapshot (for regression testing)
-    devin_snapshot_id: str = ""
-
     # Remediation batching (applies to all tools)
     batch_size: int = 10
 

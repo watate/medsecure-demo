@@ -167,27 +167,6 @@ export interface BenchmarkResponse {
   message: string;
 }
 
-// Regression Test types
-export interface RegressionTestJob {
-  id: number;
-  repo: string;
-  tool: string;
-  branch: string;
-  session_id: string;
-  session_url: string;
-  status: string; // pending, running, completed, failed
-  result_message: string | null;
-  structured_output: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface RegressionTestResponse {
-  total: number;
-  jobs: RegressionTestJob[];
-  message: string;
-}
-
 // Replay types
 export interface ReplayEvent {
   id: number;
@@ -355,27 +334,6 @@ export const api = {
   cancelBenchmark: (runId: number, repo?: string | null) =>
     fetchApi<{ status: string; run_id: number }>(
       `/api/remediate/benchmark/${runId}/cancel${qs({ repo })}`,
-      { method: "POST" },
-    ),
-
-  // Regression Tests
-  triggerRegressionTests: (
-    testCommand?: string,
-    runId?: number,
-    repo?: string | null,
-  ) =>
-    fetchApi<RegressionTestResponse>(`/api/remediate/regression-test${qs({ repo })}`, {
-      method: "POST",
-      body: JSON.stringify({
-        test_command: testCommand || "ant -Dexecute.spotbugs=true spotbugs",
-        run_id: runId ?? null,
-      }),
-    }),
-  listRegressionTests: (repo?: string | null) =>
-    fetchApi<RegressionTestJob[]>(`/api/remediate/regression-tests${qs({ repo })}`),
-  refreshRegressionTests: (repo?: string | null) =>
-    fetchApi<{ updated: number; total_running: number }>(
-      `/api/remediate/regression-tests/refresh${qs({ repo })}`,
       { method: "POST" },
     ),
 

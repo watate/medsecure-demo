@@ -154,23 +154,6 @@ async def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_tool ON api_remediation_jobs(tool, status);
             CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_alert
                 ON copilot_autofix_jobs(alert_number);
-
-            CREATE TABLE IF NOT EXISTS regression_test_jobs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                repo TEXT NOT NULL DEFAULT '',
-                tool TEXT NOT NULL,
-                branch TEXT NOT NULL,
-                session_id TEXT NOT NULL DEFAULT '',
-                session_url TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL DEFAULT 'pending',
-                result_message TEXT,
-                structured_output TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_regression_test_jobs_repo
-                ON regression_test_jobs(repo, status);
             """
         )
 

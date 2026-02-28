@@ -150,52 +150,6 @@ class DevinClient:
         )
         return response.json()
 
-    async def create_snapshot_session(
-        self,
-        prompt: str,
-        snapshot_id: str,
-        *,
-        title: str | None = None,
-        structured_output_schema: dict | None = None,
-    ) -> dict:
-        """Create a Devin session using the v1 API with a machine snapshot.
-
-        The v1 endpoint (``POST /v1/sessions``) supports ``snapshot_id``
-        which boots the session from a pre-configured machine image (e.g.
-        with JDK/Ant pre-installed for running Tomcat tests).
-
-        Returns ``{session_id, url, is_new_session}``.
-        """
-        body: dict[str, object] = {
-            "prompt": prompt,
-            "snapshot_id": snapshot_id,
-        }
-        if title:
-            body["title"] = title
-        if structured_output_schema:
-            body["structured_output_schema"] = structured_output_schema
-
-        response = await self._request_with_retry(
-            "POST",
-            "https://api.devin.ai/v1/sessions",
-            headers=self.headers,
-            json=body,
-        )
-        return response.json()
-
-    async def get_session_status_v1(self, session_id: str) -> dict:
-        """Get session status via the v1 API.
-
-        Returns full session details including ``status_enum``,
-        ``structured_output``, and ``messages``.
-        """
-        response = await self._request_with_retry(
-            "GET",
-            f"https://api.devin.ai/v1/sessions/{session_id}",
-            headers=self.headers,
-        )
-        return response.json()
-
     async def get_session_status(self, session_id: str) -> dict:
         """Get the status of a Devin session.
 
