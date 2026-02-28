@@ -85,7 +85,7 @@ export function NavBar() {
             </Link>
           )}
           <Button variant="outline" size="sm" onClick={handleSignOut}>
-            {session?.user?.email ? session.user.email.split("@")[0] : "Sign out"}
+            {session?.user?.email ? "Sign out [" + session.user.email.split("@")[0] + "]" : "Sign out"}
           </Button>
         </div>
       </div>
