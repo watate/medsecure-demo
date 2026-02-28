@@ -4,15 +4,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # GitHub
     github_token: str = ""
-    github_repo: str = "watate/tomcat"
+    # No default repo fallback — UI must select a tracked repo
+    github_repo: str = ""
 
-    # Branch configuration
+    # Default baseline branch
     branch_baseline: str = "main"
-    branch_devin: str = "tomcat-devin"
-    branch_copilot: str = "tomcat-copilot"
-    branch_anthropic: str = "tomcat-anthropic"
-    branch_openai: str = "tomcat-openai"
-    branch_google: str = "tomcat-google"
 
     # Devin API
     devin_api_key: str = ""
@@ -26,6 +22,9 @@ class Settings(BaseSettings):
 
     # Google Gemini API
     gemini_api_key: str = ""
+
+    # Remediation batching (applies to all tools)
+    batch_size: int = 10
 
     # Database
     database_path: str = "medsecure.db"

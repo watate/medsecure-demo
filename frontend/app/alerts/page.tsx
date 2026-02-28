@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { api, type Alert, type AlertsResponse } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -82,10 +84,11 @@ function AlertSkeleton() {
   );
 }
 
-// Cache type: keyed by "tool:state"
+// Cache type: keyed by "tool:state:repo"
 type AlertsCache = Record<string, AlertsResponse>;
 
 export default function AlertsPage() {
+  const { selectedRepo } = useRepo();
   const [selectedTool, setSelectedTool] = useState("baseline");
   const [stateFilter, setStateFilter] = useState("open");
   const [severityFilter, setSeverityFilter] = useState("all");
@@ -96,18 +99,18 @@ export default function AlertsPage() {
   const requestIdRef = useRef(0);
   const [alerts, setAlerts] = useState<AlertsResponse | null>(null);
 
-  const cacheKey = `${selectedTool}:${stateFilter}`;
+  const cacheKey = `${selectedTool}:${stateFilter}:${selectedRepo || ""}`;
 
   // Shared fetch function guarded by requestIdRef to prevent race conditions.
   // Both useEffect and forceRefresh increment the ID before firing; callbacks
   // only update state if their captured ID still matches the current ref value.
-  const fetchAlerts = useCallback((tool: string, state: string, key: string) => {
+  const fetchAlerts = useCallback((tool: string, state: string, key: string, repo: string | null) => {
     const id = ++requestIdRef.current;
     setLoading(true);
     setError(null);
 
     const apiState = state === "all" ? undefined : state;
-    api.getLiveAlerts(tool, apiState)
+    api.getLiveAlerts(tool, apiState, repo)
       .then((data) => {
         cacheRef.current[key] = data;
         if (requestIdRef.current === id) setAlerts(data);
@@ -125,22 +128,23 @@ export default function AlertsPage() {
       });
   }, []);
 
-  // Re-fetch when tool or state changes
+  // Re-fetch when tool, state, or repo changes
   useEffect(() => {
+    if (!selectedRepo) return;
     const cached = cacheRef.current[cacheKey];
     if (cached) {
       setAlerts(cached);
     } else {
       setAlerts(null);
     }
-    fetchAlerts(selectedTool, stateFilter, cacheKey);
-  }, [selectedTool, stateFilter, cacheKey, fetchAlerts]);
+    fetchAlerts(selectedTool, stateFilter, cacheKey, selectedRepo);
+  }, [selectedTool, stateFilter, cacheKey, fetchAlerts, selectedRepo]);
 
   const forceRefresh = useCallback(() => {
     delete cacheRef.current[cacheKey];
     setAlerts(null);
-    fetchAlerts(selectedTool, stateFilter, cacheKey);
-  }, [selectedTool, stateFilter, cacheKey, fetchAlerts]);
+    fetchAlerts(selectedTool, stateFilter, cacheKey, selectedRepo);
+  }, [selectedTool, stateFilter, cacheKey, fetchAlerts, selectedRepo]);
 
   // Filter and sort the alerts client-side
   const filteredAlerts = alerts?.alerts
@@ -161,6 +165,18 @@ export default function AlertsPage() {
     }) ?? [];
 
   const showSkeleton = loading && !alerts;
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to view alerts.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

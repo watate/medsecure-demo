@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.schemas import HealthResponse
-from app.routers import alerts, config, remediation, replay, reports, scans
+from app.routers import alerts, config, remediation, replay, reports, repos, scans
 from app.services.auth import validate_session
 from app.services.database import init_db
 
@@ -43,6 +43,7 @@ app.add_middleware(
 
 # Routers — all protected by session validation
 auth_dep = [Depends(validate_session)]
+app.include_router(repos.router, dependencies=auth_dep)
 app.include_router(scans.router, dependencies=auth_dep)
 app.include_router(alerts.router, dependencies=auth_dep)
 app.include_router(remediation.router, dependencies=auth_dep)
@@ -56,6 +57,6 @@ async def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
         version="0.1.0",
-        repo=settings.github_repo,
+        repo="(select a repo in the UI)",
         database=settings.database_path,
     )

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import {
   api,
   type Alert,
@@ -9,6 +10,7 @@ import {
   type ApiRemediationResponse,
   type ComparisonResult,
 } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +38,7 @@ function getSeverityVariant(severity: string): "default" | "secondary" | "destru
 }
 
 export default function RemediationPage() {
+  const { selectedRepo } = useRepo();
   const [activeTab, setActiveTab] = useState("api");
 
   // --- Devin state ---
@@ -60,7 +63,7 @@ export default function RemediationPage() {
     setAlertsLoading(true);
     setError(null);
     try {
-      const data = await api.getLiveAlerts("baseline", "open");
+      const data = await api.getLiveAlerts("baseline", "open", selectedRepo);
       setBaselineAlerts(data.alerts);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to load alerts";
@@ -70,47 +73,48 @@ export default function RemediationPage() {
     } finally {
       setAlertsLoading(false);
     }
-  }, []);
+  }, [selectedRepo]);
 
   // Load cost estimates for display
   const loadCostEstimates = useCallback(async () => {
     try {
-      const data = await api.compareLatest();
+      const data = await api.compareLatest(selectedRepo);
       setCostEstimates(data.cost_estimates);
     } catch {
       // Not critical — cost estimates are optional
     }
-  }, []);
+  }, [selectedRepo]);
 
   // Load API remediation job history
   const loadApiJobs = useCallback(async () => {
     try {
-      const data = await api.listApiRemediationJobs();
+      const data = await api.listApiRemediationJobs(undefined, selectedRepo);
       setApiJobs(data);
     } catch {
       // Not critical
     }
-  }, []);
+  }, [selectedRepo]);
 
   // Load Devin sessions
   const loadSessions = useCallback(async () => {
     setDevinLoading(true);
     try {
-      const data = await api.listDevinSessions();
+      const data = await api.listDevinSessions(selectedRepo);
       setSessions(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load sessions");
     } finally {
       setDevinLoading(false);
     }
-  }, []);
+  }, [selectedRepo]);
 
   useEffect(() => {
+    if (!selectedRepo) return;
     loadBaselineAlerts();
     loadCostEstimates();
     loadApiJobs();
     loadSessions();
-  }, [loadBaselineAlerts, loadCostEstimates, loadApiJobs, loadSessions]);
+  }, [selectedRepo, loadBaselineAlerts, loadCostEstimates, loadApiJobs, loadSessions]);
 
   // Selection handlers
   const toggleAlert = (alertNumber: number) => {
@@ -140,7 +144,7 @@ export default function RemediationPage() {
     setLastResult(null);
     setError(null);
     try {
-      const result = await api.triggerApiRemediation(toolKey, Array.from(selectedAlerts));
+      const result = await api.triggerApiRemediation(toolKey, Array.from(selectedAlerts), selectedRepo);
       setLastResult(result);
       await loadApiJobs();
     } catch (e) {
@@ -155,7 +159,7 @@ export default function RemediationPage() {
     setDevinTriggering(true);
     setError(null);
     try {
-      await api.triggerDevinRemediation();
+      await api.triggerDevinRemediation(undefined, undefined, selectedRepo);
       await loadSessions();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to trigger remediation");
@@ -167,7 +171,7 @@ export default function RemediationPage() {
   const refreshDevin = async () => {
     setDevinRefreshing(true);
     try {
-      await api.refreshDevinSessions();
+      await api.refreshDevinSessions(selectedRepo);
       await loadSessions();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to refresh sessions");
@@ -179,6 +183,18 @@ export default function RemediationPage() {
   const runningSessions = sessions.filter((s) => s.status === "running");
   const completedSessions = sessions.filter((s) => s.status === "completed");
   const failedSessions = sessions.filter((s) => s.status === "failed" || s.status === "stopped");
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to run remediation.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

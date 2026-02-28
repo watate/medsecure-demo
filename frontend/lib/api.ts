@@ -86,11 +86,6 @@ export interface DevinSession {
 export interface RepoConfig {
   github_repo: string;
   branch_baseline: string;
-  branch_devin: string;
-  branch_copilot: string;
-  branch_anthropic: string;
-  branch_openai: string;
-  branch_google: string;
 }
 
 export interface HealthResponse {
@@ -98,6 +93,23 @@ export interface HealthResponse {
   version: string;
   repo: string;
   database: string;
+}
+
+// Repo types
+export interface Repo {
+  id: number;
+  full_name: string;
+  default_branch: string;
+  added_at: string;
+}
+
+export interface GitHubRepoInfo {
+  full_name: string;
+  description: string | null;
+  default_branch: string;
+  private: boolean;
+  language: string | null;
+  html_url: string;
 }
 
 // API Remediation types
@@ -144,6 +156,7 @@ export interface ReplayEvent {
   detail: string;
   alert_number: number | null;
   timestamp_offset_ms: number;
+  metadata: Record<string, unknown>;
   created_at: string;
 }
 
@@ -155,6 +168,7 @@ export interface ReplayRun {
   ended_at: string | null;
   status: string;
   tools: string[];
+  branch_name: string | null;
 }
 
 export interface ReplayRunWithEvents extends ReplayRun {
@@ -183,60 +197,98 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Build a query string from params, filtering out nullish values */
+function qs(params: Record<string, string | number | boolean | null | undefined>): string {
+  const entries = Object.entries(params).filter(
+    ([, v]) => v !== null && v !== undefined && v !== ""
+  );
+  if (entries.length === 0) return "";
+  return "?" + new URLSearchParams(entries.map(([k, v]) => [k, String(v)])).toString();
+}
+
 export const api = {
   // Health
   health: () => fetchApi<HealthResponse>("/api/health"),
 
   // Config
-  getConfig: () => fetchApi<RepoConfig>("/api/config"),
+  getConfig: (repo?: string | null) =>
+    fetchApi<RepoConfig>(`/api/config${qs({ repo })}`),
+
+  // Repos
+  listAvailableRepos: (search?: string) =>
+    fetchApi<GitHubRepoInfo[]>(`/api/repos/available${qs({ search })}`),
+  listTrackedRepos: () => fetchApi<Repo[]>("/api/repos"),
+  addRepo: (fullName: string) =>
+    fetchApi<Repo>("/api/repos", {
+      method: "POST",
+      body: JSON.stringify({ full_name: fullName }),
+    }),
+  removeRepo: (repoId: number) =>
+    fetchApi<{ status: string }>(`/api/repos/${repoId}`, { method: "DELETE" }),
 
   // Scans
-  triggerScan: () =>
-    fetchApi<{ scan_id: number; repo: string; branches_scanned: string[]; created_at: string }>("/api/scans/trigger", {
-      method: "POST",
-    }),
-  listScans: () => fetchApi<ScanListItem[]>("/api/scans"),
-  getLatestScan: () => fetchApi<ScanSnapshot | null>("/api/scans/latest"),
+  triggerScan: (repo?: string | null) =>
+    fetchApi<{ scan_id: number; repo: string; branches_scanned: string[]; created_at: string }>(
+      `/api/scans/trigger${qs({ repo })}`,
+      { method: "POST" }
+    ),
+  listScans: (repo?: string | null) =>
+    fetchApi<ScanListItem[]>(`/api/scans${qs({ repo })}`),
+  getLatestScan: (repo?: string | null) =>
+    fetchApi<ScanSnapshot | null>(`/api/scans/latest${qs({ repo })}`),
   getScan: (id: number) => fetchApi<ScanSnapshot>(`/api/scans/${id}`),
-  compareLatest: () => fetchApi<ComparisonResult>("/api/scans/compare/latest"),
+  compareLatest: (repo?: string | null) =>
+    fetchApi<ComparisonResult>(`/api/scans/compare/latest${qs({ repo })}`),
 
   // Alerts
-  getLiveAlerts: (tool: string, state?: string) => {
-    const params = new URLSearchParams({ tool });
-    if (state) params.set("state", state);
-    return fetchApi<AlertsResponse>(`/api/alerts/live?${params}`);
+  getLiveAlerts: (tool: string, state?: string, repo?: string | null) => {
+    const params: Record<string, string | null | undefined> = { tool, repo };
+    if (state) params.state = state;
+    return fetchApi<AlertsResponse>(`/api/alerts/live${qs(params)}`);
   },
-  getSnapshotAlerts: (scanId: number, tool: string) =>
-    fetchApi<AlertsResponse>(`/api/alerts/snapshot/${scanId}?tool=${tool}`),
+  getSnapshotAlerts: (scanId: number, tool: string, repo?: string | null) =>
+    fetchApi<AlertsResponse>(`/api/alerts/snapshot/${scanId}${qs({ tool, repo })}`),
 
   // Remediation
-  triggerDevinRemediation: (alertNumbers?: number[], batchSize?: number) =>
-    fetchApi<{ sessions_created: number; sessions: DevinSession[]; message: string }>("/api/remediate/devin", {
-      method: "POST",
-      body: JSON.stringify({
-        tool: "devin",
-        alert_numbers: alertNumbers || null,
-        batch_size: batchSize || 5,
-      }),
-    }),
-  listDevinSessions: () => fetchApi<DevinSession[]>("/api/remediate/devin/sessions"),
-  refreshDevinSessions: () =>
-    fetchApi<{ updated: number; total_running: number }>("/api/remediate/devin/refresh", { method: "POST" }),
+  triggerDevinRemediation: (alertNumbers?: number[], batchSize?: number, repo?: string | null) =>
+    fetchApi<{ sessions_created: number; sessions: DevinSession[]; message: string }>(
+      `/api/remediate/devin${qs({ repo })}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          tool: "devin",
+          alert_numbers: alertNumbers || null,
+          batch_size: batchSize || 5,
+        }),
+      }
+    ),
+  listDevinSessions: (repo?: string | null) =>
+    fetchApi<DevinSession[]>(`/api/remediate/devin/sessions${qs({ repo })}`),
+  refreshDevinSessions: (repo?: string | null) =>
+    fetchApi<{ updated: number; total_running: number }>(
+      `/api/remediate/devin/refresh${qs({ repo })}`,
+      { method: "POST" }
+    ),
 
   // API-based Remediation (Anthropic, OpenAI, Google)
-  triggerApiRemediation: (tool: string, alertNumbers: number[]) =>
-    fetchApi<ApiRemediationResponse>("/api/remediate/api-tool", {
+  triggerApiRemediation: (tool: string, alertNumbers: number[], repo?: string | null) =>
+    fetchApi<ApiRemediationResponse>(`/api/remediate/api-tool${qs({ repo })}`, {
       method: "POST",
       body: JSON.stringify({ tool, alert_numbers: alertNumbers }),
     }),
-  listApiRemediationJobs: (tool?: string) => {
-    const params = tool ? `?tool=${tool}` : "";
-    return fetchApi<ApiRemediationJob[]>(`/api/remediate/api-tool/jobs${params}`);
+  listApiRemediationJobs: (tool?: string, repo?: string | null) => {
+    return fetchApi<ApiRemediationJob[]>(`/api/remediate/api-tool/jobs${qs({ tool, repo })}`);
   },
 
   // Reports
-  generateReport: (reportType: "ciso" | "cto", scanId?: number, avgCost?: number, avgMinutes?: number) =>
-    fetchApi<ReportData>(`/api/reports/generate/${reportType}`, {
+  generateReport: (
+    reportType: "ciso" | "cto",
+    scanId?: number,
+    avgCost?: number,
+    avgMinutes?: number,
+    repo?: string | null,
+  ) =>
+    fetchApi<ReportData>(`/api/reports/generate/${reportType}${qs({ repo })}`, {
       method: "POST",
       body: JSON.stringify({
         scan_id: scanId ?? null,
@@ -244,18 +296,20 @@ export const api = {
         avg_manual_fix_minutes: avgMinutes ?? 30.0,
       }),
     }),
-  getLatestReport: (reportType: "ciso" | "cto") =>
-    fetchApi<ReportData>(`/api/reports/latest/${reportType}`),
-  listReports: (reportType?: string) => {
-    const params = reportType ? `?report_type=${reportType}` : "";
-    return fetchApi<ReportHistoryItem[]>(`/api/reports/history${params}`);
+  getLatestReport: (reportType: "ciso" | "cto", repo?: string | null) =>
+    fetchApi<ReportData>(`/api/reports/latest/${reportType}${qs({ repo })}`),
+  listReports: (reportType?: string, repo?: string | null) => {
+    return fetchApi<ReportHistoryItem[]>(`/api/reports/history${qs({ report_type: reportType, repo })}`);
   },
 
   // Replay
-  listReplayRuns: () => fetchApi<ReplayRun[]>("/api/replay/runs"),
-  getReplayRun: (runId: number) => fetchApi<ReplayRunWithEvents>(`/api/replay/runs/${runId}`),
-  seedDemoReplay: () =>
-    fetchApi<{ run_id: number; events_created: number; message: string }>("/api/replay/demo-seed", {
-      method: "POST",
-    }),
+  listReplayRuns: (repo?: string | null) =>
+    fetchApi<ReplayRun[]>(`/api/replay/runs${qs({ repo })}`),
+  getReplayRun: (runId: number) =>
+    fetchApi<ReplayRunWithEvents>(`/api/replay/runs/${runId}`),
+  seedDemoReplay: (repo?: string | null) =>
+    fetchApi<{ run_id: number; events_created: number; message: string }>(
+      `/api/replay/demo-seed${qs({ repo })}`,
+      { method: "POST" }
+    ),
 };

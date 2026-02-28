@@ -15,6 +15,13 @@ async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.executescript(
             """
+            CREATE TABLE IF NOT EXISTS repos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL UNIQUE,
+                default_branch TEXT NOT NULL DEFAULT 'main',
+                added_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS scans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 repo TEXT NOT NULL,
@@ -60,7 +67,8 @@ async def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS devin_sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL UNIQUE,
+                repo TEXT NOT NULL DEFAULT '',
+                session_id TEXT NOT NULL,
                 alert_number INTEGER NOT NULL,
                 rule_id TEXT NOT NULL,
                 file_path TEXT NOT NULL DEFAULT '',
@@ -77,7 +85,8 @@ async def init_db() -> None:
                 started_at TEXT NOT NULL DEFAULT (datetime('now')),
                 ended_at TEXT,
                 status TEXT NOT NULL DEFAULT 'running',
-                tools TEXT NOT NULL DEFAULT '[]'
+                tools TEXT NOT NULL DEFAULT '[]',
+                branch_name TEXT
             );
 
             CREATE TABLE IF NOT EXISTS replay_events (
@@ -88,6 +97,7 @@ async def init_db() -> None:
                 detail TEXT NOT NULL DEFAULT '',
                 alert_number INTEGER,
                 timestamp_offset_ms INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
@@ -101,6 +111,7 @@ async def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS api_remediation_jobs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL DEFAULT '',
                 tool TEXT NOT NULL,
                 alert_number INTEGER NOT NULL,
                 rule_id TEXT NOT NULL DEFAULT '',
@@ -112,12 +123,32 @@ async def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS copilot_autofix_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo TEXT NOT NULL DEFAULT '',
+                alert_number INTEGER NOT NULL,
+                rule_id TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                autofix_status TEXT,
+                commit_sha TEXT,
+                description TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_repos_full_name ON repos(full_name);
             CREATE INDEX IF NOT EXISTS idx_alerts_scan_branch ON alerts(scan_id, branch);
             CREATE INDEX IF NOT EXISTS idx_scan_branches_scan ON scan_branches(scan_id);
             CREATE INDEX IF NOT EXISTS idx_devin_sessions_status ON devin_sessions(status);
+            CREATE INDEX IF NOT EXISTS idx_devin_sessions_session_alert
+                ON devin_sessions(session_id, alert_number);
             CREATE INDEX IF NOT EXISTS idx_replay_events_run ON replay_events(run_id);
             CREATE INDEX IF NOT EXISTS idx_generated_reports_scan ON generated_reports(scan_id, report_type);
             CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_tool ON api_remediation_jobs(tool, status);
+            CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_alert
+                ON copilot_autofix_jobs(alert_number);
             """
         )
 
@@ -127,6 +158,95 @@ async def init_db() -> None:
         if "estimated_prompt_tokens" not in columns:
             await db.execute(
                 "ALTER TABLE scan_branches ADD COLUMN estimated_prompt_tokens INTEGER NOT NULL DEFAULT 0"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(replay_events)")
+        re_columns = {row[1] for row in await cursor.fetchall()}
+        if "metadata" not in re_columns:
+            await db.execute(
+                "ALTER TABLE replay_events ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(replay_runs)")
+        rr_columns = {row[1] for row in await cursor.fetchall()}
+        if "branch_name" not in rr_columns:
+            await db.execute(
+                "ALTER TABLE replay_runs ADD COLUMN branch_name TEXT"
+            )
+
+        # Add repo columns to remediation tables (for multi-repo support)
+        cursor = await db.execute("PRAGMA table_info(devin_sessions)")
+        ds_columns = {row[1] for row in await cursor.fetchall()}
+        if "repo" not in ds_columns:
+            await db.execute(
+                "ALTER TABLE devin_sessions ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(api_remediation_jobs)")
+        ar_columns = {row[1] for row in await cursor.fetchall()}
+        if "repo" not in ar_columns:
+            await db.execute(
+                "ALTER TABLE api_remediation_jobs ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
+            )
+
+        cursor = await db.execute("PRAGMA table_info(copilot_autofix_jobs)")
+        ca_columns = {row[1] for row in await cursor.fetchall()}
+        if "repo" not in ca_columns:
+            await db.execute(
+                "ALTER TABLE copilot_autofix_jobs ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
+            )
+
+        # Create repo-dependent indexes (must come after ALTER TABLE adds repo)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_devin_sessions_repo_status "
+            "ON devin_sessions(repo, status)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_api_remediation_jobs_repo_tool "
+            "ON api_remediation_jobs(repo, tool, status)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_copilot_autofix_jobs_repo_alert "
+            "ON copilot_autofix_jobs(repo, alert_number)"
+        )
+
+        # Migrate devin_sessions: remove UNIQUE constraint on session_id
+        # so grouped sessions (multiple alerts per session) can share one id.
+        cursor = await db.execute("PRAGMA index_list(devin_sessions)")
+        index_rows = await cursor.fetchall()
+        has_unique_idx = any(
+            row[1] == "sqlite_autoindex_devin_sessions_1"
+            for row in index_rows
+        )
+        if has_unique_idx:
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS devin_sessions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repo TEXT NOT NULL DEFAULT '',
+                    session_id TEXT NOT NULL,
+                    alert_number INTEGER NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    file_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'running',
+                    pr_url TEXT,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                INSERT INTO devin_sessions_new
+                    (id, repo, session_id, alert_number, rule_id,
+                     file_path, status, pr_url, created_at, updated_at)
+                    SELECT id, repo, session_id, alert_number, rule_id,
+                           file_path, status, pr_url, created_at, updated_at
+                    FROM devin_sessions;
+                DROP TABLE devin_sessions;
+                ALTER TABLE devin_sessions_new
+                    RENAME TO devin_sessions;
+                CREATE INDEX IF NOT EXISTS idx_devin_sessions_status
+                    ON devin_sessions(status);
+                CREATE INDEX IF NOT EXISTS idx_devin_sessions_session_alert
+                    ON devin_sessions(session_id, alert_number);
+                """
             )
 
         await db.commit()

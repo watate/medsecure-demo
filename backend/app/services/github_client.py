@@ -1,7 +1,13 @@
+import asyncio
+import logging
+import time
+
 import httpx
 
 from app.config import settings
 from app.models.schemas import Alert, AlertWithCWE, BranchSummary
+
+logger = logging.getLogger(__name__)
 
 
 class GitHubClient:
@@ -9,12 +15,74 @@ class GitHubClient:
 
     def __init__(self, token: str | None = None, repo: str | None = None):
         self.token = token or settings.github_token
-        self.repo = repo or settings.github_repo
+        self.repo = repo or ""
         self.headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
         }
+
+    async def list_accessible_repos(self, per_page: int = 100) -> list[dict]:
+        """List repositories accessible by the configured PAT.
+
+        Returns a list of dicts with repo metadata (full_name, description,
+        default_branch, private, language, html_url).
+        """
+        repos: list[dict] = []
+        page = 1
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while True:
+                response = await client.get(
+                    f"{self.BASE_URL}/user/repos",
+                    headers=self.headers,
+                    params={
+                        "per_page": per_page,
+                        "page": page,
+                        "sort": "updated",
+                        "direction": "desc",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if not data:
+                    break
+
+                for item in data:
+                    repos.append({
+                        "full_name": item["full_name"],
+                        "description": item.get("description"),
+                        "default_branch": item.get("default_branch", "main"),
+                        "private": item.get("private", False),
+                        "language": item.get("language"),
+                        "html_url": item.get("html_url", ""),
+                    })
+
+                if len(data) < per_page:
+                    break
+                page += 1
+
+        return repos
+
+    async def get_repo_info(self, repo: str | None = None) -> dict:
+        """Get metadata for a single repository."""
+        target = repo or self.repo
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{target}",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            item = response.json()
+            return {
+                "full_name": item["full_name"],
+                "description": item.get("description"),
+                "default_branch": item.get("default_branch", "main"),
+                "private": item.get("private", False),
+                "language": item.get("language"),
+                "html_url": item.get("html_url", ""),
+            }
 
     async def get_alerts(self, branch: str, state: str | None = None, per_page: int = 100) -> list[Alert]:
         """Fetch CodeQL alerts for a specific branch."""
@@ -183,6 +251,125 @@ class GitHubClient:
             )
             response.raise_for_status()
             return response.json()
+
+    async def get_branch_sha(self, branch: str) -> str:
+        """Get the HEAD commit SHA of a branch."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/git/ref/heads/{branch}",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()["object"]["sha"]
+
+    async def create_branch(self, new_branch: str, from_branch: str = "main") -> str:
+        """Create a new branch from an existing branch via GitHub API.
+
+        Returns the SHA of the new branch HEAD.
+        """
+        sha = await self.get_branch_sha(from_branch)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}/git/refs",
+                headers=self.headers,
+                json={
+                    "ref": f"refs/heads/{new_branch}",
+                    "sha": sha,
+                },
+            )
+            response.raise_for_status()
+            return response.json()["object"]["sha"]
+
+    async def branch_exists(self, branch: str) -> bool:
+        """Check if a branch exists."""
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/git/ref/heads/{branch}",
+                headers=self.headers,
+            )
+            return response.status_code == 200
+
+    # ------------------------------------------------------------------
+    # Copilot Autofix helpers
+    # ------------------------------------------------------------------
+
+    async def trigger_autofix(self, alert_number: int) -> dict:
+        """Trigger Copilot Autofix generation for a code-scanning alert.
+
+        POST /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix
+        Returns 202 on success (generation started).
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def get_autofix_status(self, alert_number: int) -> dict:
+        """Get autofix status and fix details for an alert.
+
+        GET /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix
+        Returns status (e.g. "pending", "succeeded", "failed") plus
+        fix description and changes when succeeded.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def commit_autofix(
+        self, alert_number: int, target_ref: str, message: str,
+    ) -> dict:
+        """Commit a Copilot Autofix to a branch.
+
+        POST /repos/{owner}/{repo}/code-scanning/alerts/{number}/autofix/commits
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.BASE_URL}/repos/{self.repo}"
+                f"/code-scanning/alerts/{alert_number}/autofix/commits",
+                headers=self.headers,
+                json={
+                    "target_ref": f"refs/heads/{target_ref}",
+                    "message": message,
+                },
+            )
+            response.raise_for_status()
+            return response.json()
+
+    async def poll_autofix(
+        self,
+        alert_number: int,
+        *,
+        poll_interval: float = 3.0,
+        max_wait: float = 120.0,
+    ) -> dict:
+        """Trigger autofix and poll until it completes or times out.
+
+        Returns the final autofix status dict.
+        """
+        await self.trigger_autofix(alert_number)
+        logger.info(
+            "Triggered Copilot Autofix for alert #%d, polling...",
+            alert_number,
+        )
+
+        deadline = time.monotonic() + max_wait
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+            status = await self.get_autofix_status(alert_number)
+            state = status.get("status", "")
+            if state in ("succeeded", "failed", "dismissed", "skipped"):
+                return status
+        # Timed out — return last known status
+        return await self.get_autofix_status(alert_number)
 
     async def get_file_content(self, path: str, ref: str) -> str:
         """Get file content from a specific branch."""

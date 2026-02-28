@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { api, type ReportData } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -509,6 +511,7 @@ function CTOReport({ data }: { data: ReportData }) {
 }
 
 export default function ReportsPage() {
+  const { selectedRepo } = useRepo();
   const [reportType, setReportType] = useState<"ciso" | "cto">("ciso");
   const [report, setReport] = useState<ReportData | null>(null);
   const [generating, setGenerating] = useState(false);
@@ -519,7 +522,7 @@ export default function ReportsPage() {
     setGenerating(true);
     setError(null);
     try {
-      const data = await api.generateReport(reportType);
+      const data = await api.generateReport(reportType, undefined, undefined, undefined, selectedRepo);
       setReport(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to generate report";
@@ -533,7 +536,7 @@ export default function ReportsPage() {
     setLoadingLatest(true);
     setError(null);
     try {
-      const data = await api.getLatestReport(reportType);
+      const data = await api.getLatestReport(reportType, selectedRepo);
       setReport(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "No report found";
@@ -546,6 +549,18 @@ export default function ReportsPage() {
       setLoadingLatest(false);
     }
   };
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to generate reports.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

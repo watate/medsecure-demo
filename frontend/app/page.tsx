@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { api, type ComparisonResult } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +38,7 @@ function SeverityBar({ label, count, total, color }: { label: string; count: num
 }
 
 export default function DashboardPage() {
+  const { selectedRepo } = useRepo();
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
@@ -45,7 +48,7 @@ export default function DashboardPage() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.compareLatest();
+      const data = await api.compareLatest(selectedRepo);
       setComparison(data);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to load comparison";
@@ -58,13 +61,13 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedRepo]);
 
   const triggerScan = async () => {
     setScanning(true);
     setError(null);
     try {
-      await api.triggerScan();
+      await api.triggerScan(selectedRepo);
       await loadComparison();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to trigger scan");
@@ -74,8 +77,20 @@ export default function DashboardPage() {
   };
 
   useEffect(() => {
-    loadComparison();
-  }, [loadComparison]);
+    if (selectedRepo) loadComparison();
+  }, [loadComparison, selectedRepo]);
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to get started.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-8">

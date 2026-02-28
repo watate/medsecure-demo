@@ -4,9 +4,8 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
-from app.config import settings
 from app.models.schemas import (
     Alert,
     BranchSummary,
@@ -18,6 +17,11 @@ from app.models.schemas import (
 )
 from app.services.database import get_db
 from app.services.github_client import GitHubClient
+from app.services.repo_resolver import (
+    get_latest_tool_branches,
+    resolve_baseline_branch,
+    resolve_repo,
+)
 from app.services.report_generator import _estimate_api_cost
 from app.services.token_counter import estimate_prompt_tokens_for_alert
 
@@ -117,44 +121,35 @@ async def _compute_baseline_token_estimate(github: GitHubClient, alerts: list[Al
     return total_tokens
 
 
-def _get_branch_map() -> dict[str, str]:
-    """Return mapping of tool name to branch name."""
-    return {
-        "baseline": settings.branch_baseline,
-        "devin": settings.branch_devin,
-        "copilot": settings.branch_copilot,
-        "anthropic": settings.branch_anthropic,
-        "openai": settings.branch_openai,
-        "gemini": settings.branch_google,
-    }
-
-
 @router.post("/trigger", response_model=TriggerScanResponse)
-async def trigger_scan() -> TriggerScanResponse:
-    """Trigger a new scan: fetch CodeQL alerts for all branches and store a snapshot."""
-    github = GitHubClient()
-    branch_map = _get_branch_map()
+async def trigger_scan(
+    repo: str | None = Query(default=None, description="Repository (owner/repo). Defaults to first tracked repo."),
+) -> TriggerScanResponse:
+    """Trigger a new scan: fetch CodeQL alerts for the baseline branch and store a snapshot."""
+    resolved_repo = await resolve_repo(repo)
+    github = GitHubClient(repo=resolved_repo)
+    baseline_branch = await resolve_baseline_branch(resolved_repo)
+    tool_branches = await get_latest_tool_branches(resolved_repo)
+    branch_map: dict[str, str] = {"baseline": baseline_branch, **tool_branches}
     now = datetime.now(timezone.utc).isoformat()
 
     db = await get_db()
     try:
         cursor = await db.execute(
             "INSERT INTO scans (repo, created_at) VALUES (?, ?)",
-            (settings.github_repo, now),
+            (resolved_repo, now),
         )
         scan_id = cursor.lastrowid
         assert scan_id is not None
 
-        branches_scanned = []
+        branches_scanned: list[str] = []
         baseline_alerts: list[Alert] = []
-        baseline_branch: str = branch_map.get("baseline", "main")
 
         for tool_name, branch in branch_map.items():
             try:
                 alerts = await github.get_alerts(branch)
                 summary = github.compute_branch_summary(alerts, branch, tool_name)
 
-                # Keep baseline alerts for token counting
                 if tool_name == "baseline":
                     baseline_alerts = alerts
 
@@ -207,18 +202,18 @@ async def trigger_scan() -> TriggerScanResponse:
                     )
 
                 branches_scanned.append(branch)
-                logger.info("Scanned branch %s (%s): %d alerts", branch, tool_name, summary.total)
+                logger.info("Scanned %s %s (%s): %d alerts", resolved_repo, tool_name, branch, summary.total)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code == 403:
                     logger.error(
-                        "GitHub API 403 for branch %s (%s): token likely lacks "
+                        "GitHub API 403 for %s (%s): token likely lacks "
                         "'security_events' scope or 'Code scanning alerts: Read' permission",
-                        branch, tool_name,
+                        resolved_repo, branch,
                     )
                 else:
-                    logger.exception("Failed to scan branch %s (%s)", branch, tool_name)
+                    logger.exception("Failed to scan %s (%s)", resolved_repo, branch)
             except Exception:
-                logger.exception("Failed to scan branch %s (%s)", branch, tool_name)
+                logger.exception("Failed to scan %s (%s)", resolved_repo, branch)
 
         # Compute dynamic token estimates for baseline open alerts
         estimated_tokens = await _compute_baseline_token_estimate(
@@ -234,7 +229,7 @@ async def trigger_scan() -> TriggerScanResponse:
 
         return TriggerScanResponse(
             scan_id=scan_id,
-            repo=settings.github_repo,
+            repo=resolved_repo,
             branches_scanned=branches_scanned,
             created_at=now,
         )
@@ -243,18 +238,32 @@ async def trigger_scan() -> TriggerScanResponse:
 
 
 @router.get("", response_model=list[ScanListItem])
-async def list_scans() -> list[ScanListItem]:
-    """List all scan snapshots."""
+async def list_scans(
+    repo: str | None = Query(default=None, description="Filter by repository"),
+) -> list[ScanListItem]:
+    """List all scan snapshots, optionally filtered by repo."""
     db = await get_db()
     try:
-        cursor = await db.execute(
-            """SELECT s.id, s.repo, s.created_at,
-                      COUNT(sb.id) as branch_count
-               FROM scans s
-               LEFT JOIN scan_branches sb ON sb.scan_id = s.id
-               GROUP BY s.id
-               ORDER BY s.created_at DESC"""
-        )
+        if repo:
+            cursor = await db.execute(
+                """SELECT s.id, s.repo, s.created_at,
+                          COUNT(sb.id) as branch_count
+                   FROM scans s
+                   LEFT JOIN scan_branches sb ON sb.scan_id = s.id
+                   WHERE s.repo = ?
+                   GROUP BY s.id
+                   ORDER BY s.created_at DESC""",
+                (repo,),
+            )
+        else:
+            cursor = await db.execute(
+                """SELECT s.id, s.repo, s.created_at,
+                          COUNT(sb.id) as branch_count
+                   FROM scans s
+                   LEFT JOIN scan_branches sb ON sb.scan_id = s.id
+                   GROUP BY s.id
+                   ORDER BY s.created_at DESC"""
+            )
         rows = await cursor.fetchall()
         return [
             ScanListItem(id=row["id"], repo=row["repo"], created_at=row["created_at"], branch_count=row["branch_count"])
@@ -265,11 +274,19 @@ async def list_scans() -> list[ScanListItem]:
 
 
 @router.get("/latest", response_model=ScanSnapshot | None)
-async def get_latest_scan() -> ScanSnapshot | None:
+async def get_latest_scan(
+    repo: str | None = Query(default=None, description="Filter by repository"),
+) -> ScanSnapshot | None:
     """Get the most recent scan snapshot with branch summaries."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id, repo, created_at FROM scans ORDER BY created_at DESC LIMIT 1")
+        if repo:
+            cursor = await db.execute(
+                "SELECT id, repo, created_at FROM scans WHERE repo = ? ORDER BY created_at DESC LIMIT 1",
+                (repo,),
+            )
+        else:
+            cursor = await db.execute("SELECT id, repo, created_at FROM scans ORDER BY created_at DESC LIMIT 1")
         scan = await cursor.fetchone()
         if not scan:
             return None
@@ -310,9 +327,11 @@ async def get_scan(scan_id: int) -> ScanSnapshot:
 
 
 @router.get("/compare/latest", response_model=ComparisonResult)
-async def compare_latest() -> ComparisonResult:
+async def compare_latest(
+    repo: str | None = Query(default=None, description="Filter by repository"),
+) -> ComparisonResult:
     """Get comparison of latest scan across all branches."""
-    scan = await get_latest_scan()
+    scan = await get_latest_scan(repo=repo)
     if not scan:
         raise HTTPException(status_code=404, detail="No scans found. Trigger a scan first.")
 

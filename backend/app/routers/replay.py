@@ -4,27 +4,31 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
-from app.config import settings
 from app.models.schemas import ReplayEvent, ReplayRun, ReplayRunWithEvents
 from app.services.database import get_db
+from app.services.repo_resolver import resolve_repo
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/replay", tags=["replay"])
 
 
 @router.post("/runs", response_model=ReplayRun)
-async def create_run(scan_id: int | None = None) -> ReplayRun:
+async def create_run(
+    scan_id: int | None = None,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> ReplayRun:
     """Create a new replay run to record remediation events."""
     now = datetime.now(timezone.utc).isoformat()
     tools = ["devin", "copilot", "anthropic", "openai", "gemini"]
 
     db = await get_db()
     try:
+        resolved_repo = await resolve_repo(repo)
         cursor = await db.execute(
             "INSERT INTO replay_runs (repo, scan_id, started_at, status, tools) VALUES (?, ?, ?, ?, ?)",
-            (settings.github_repo, scan_id, now, "running", json.dumps(tools)),
+            (resolved_repo, scan_id, now, "running", json.dumps(tools)),
         )
         run_id = cursor.lastrowid
         assert run_id is not None
@@ -32,7 +36,7 @@ async def create_run(scan_id: int | None = None) -> ReplayRun:
 
         return ReplayRun(
             id=run_id,
-            repo=settings.github_repo,
+            repo=resolved_repo,
             scan_id=scan_id,
             started_at=now,
             ended_at=None,
@@ -51,15 +55,18 @@ async def add_event(
     detail: str = "",
     alert_number: int | None = None,
     timestamp_offset_ms: int = 0,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> ReplayEvent:
     """Add an event to a replay run."""
     now = datetime.now(timezone.utc).isoformat()
 
     db = await get_db()
     try:
-        # Verify run exists
-        cursor = await db.execute("SELECT id FROM replay_runs WHERE id = ?", (run_id,))
-        if not await cursor.fetchone():
+        # Verify run exists for repo
+        resolved_repo = await resolve_repo(repo)
+        cursor = await db.execute("SELECT id, repo FROM replay_runs WHERE id = ?", (run_id,))
+        run = await cursor.fetchone()
+        if not run or run["repo"] != resolved_repo:
             raise HTTPException(status_code=404, detail="Run not found")
 
         cursor = await db.execute(
@@ -80,6 +87,7 @@ async def add_event(
             detail=detail,
             alert_number=alert_number,
             timestamp_offset_ms=timestamp_offset_ms,
+            metadata={},
             created_at=now,
         )
     finally:
@@ -87,19 +95,24 @@ async def add_event(
 
 
 @router.post("/runs/{run_id}/complete")
-async def complete_run(run_id: int) -> dict:
+async def complete_run(
+    run_id: int,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> dict:
     """Mark a replay run as completed."""
     now = datetime.now(timezone.utc).isoformat()
 
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM replay_runs WHERE id = ?", (run_id,))
-        if not await cursor.fetchone():
+        resolved_repo = await resolve_repo(repo)
+        cursor = await db.execute("SELECT id, repo FROM replay_runs WHERE id = ?", (run_id,))
+        run = await cursor.fetchone()
+        if not run or run["repo"] != resolved_repo:
             raise HTTPException(status_code=404, detail="Run not found")
 
         await db.execute(
-            "UPDATE replay_runs SET status = 'completed', ended_at = ? WHERE id = ?",
-            (now, run_id),
+            "UPDATE replay_runs SET status = 'completed', ended_at = ? WHERE id = ? AND repo = ?",
+            (now, run_id, resolved_repo),
         )
         await db.commit()
         return {"status": "completed", "ended_at": now}
@@ -108,11 +121,17 @@ async def complete_run(run_id: int) -> dict:
 
 
 @router.get("/runs", response_model=list[ReplayRun])
-async def list_runs() -> list[ReplayRun]:
-    """List all replay runs."""
+async def list_runs(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> list[ReplayRun]:
+    """List replay runs for a repo."""
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT * FROM replay_runs ORDER BY started_at DESC")
+        resolved_repo = await resolve_repo(repo)
+        cursor = await db.execute(
+            "SELECT * FROM replay_runs WHERE repo = ? ORDER BY started_at DESC",
+            (resolved_repo,),
+        )
         rows = await cursor.fetchall()
         return [
             ReplayRun(
@@ -123,6 +142,7 @@ async def list_runs() -> list[ReplayRun]:
                 ended_at=row["ended_at"],
                 status=row["status"],
                 tools=json.loads(row["tools"]),
+                branch_name=row["branch_name"] if "branch_name" in row.keys() else None,
             )
             for row in rows
         ]
@@ -131,13 +151,17 @@ async def list_runs() -> list[ReplayRun]:
 
 
 @router.get("/runs/{run_id}", response_model=ReplayRunWithEvents)
-async def get_run(run_id: int) -> ReplayRunWithEvents:
+async def get_run(
+    run_id: int,
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> ReplayRunWithEvents:
     """Get a replay run with all its events for playback."""
     db = await get_db()
     try:
+        resolved_repo = await resolve_repo(repo)
         cursor = await db.execute("SELECT * FROM replay_runs WHERE id = ?", (run_id,))
         run = await cursor.fetchone()
-        if not run:
+        if not run or run["repo"] != resolved_repo:
             raise HTTPException(status_code=404, detail="Run not found")
 
         cursor = await db.execute(
@@ -154,6 +178,7 @@ async def get_run(run_id: int) -> ReplayRunWithEvents:
                 detail=row["detail"],
                 alert_number=row["alert_number"],
                 timestamp_offset_ms=row["timestamp_offset_ms"],
+                metadata=json.loads(row["metadata"]) if row["metadata"] else {},
                 created_at=row["created_at"],
             )
             for row in event_rows
@@ -170,6 +195,7 @@ async def get_run(run_id: int) -> ReplayRunWithEvents:
             ended_at=run["ended_at"],
             status=run["status"],
             tools=json.loads(run["tools"]),
+            branch_name=run["branch_name"] if "branch_name" in run.keys() else None,
             events=events,
             total_duration_ms=total_duration_ms,
         )
@@ -178,7 +204,9 @@ async def get_run(run_id: int) -> ReplayRunWithEvents:
 
 
 @router.post("/demo-seed")
-async def seed_demo_data() -> dict:
+async def seed_demo_data(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+) -> dict:
     """Seed a demo replay run with simulated events for presentation purposes.
 
     Creates a realistic-looking timeline showing Devin fixing alerts much faster
@@ -189,9 +217,10 @@ async def seed_demo_data() -> dict:
 
     db = await get_db()
     try:
+        resolved_repo = await resolve_repo(repo)
         cursor = await db.execute(
             "INSERT INTO replay_runs (repo, scan_id, started_at, ended_at, status, tools) VALUES (?, ?, ?, ?, ?, ?)",
-            (settings.github_repo, None, now, now, "completed", json.dumps(tools)),
+            (resolved_repo, None, now, now, "completed", json.dumps(tools)),
         )
         run_id = cursor.lastrowid
         assert run_id is not None

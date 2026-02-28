@@ -123,11 +123,26 @@ class DevinSessionCreate(BaseModel):
 class RepoConfig(BaseModel):
     github_repo: str
     branch_baseline: str
-    branch_devin: str
-    branch_copilot: str
-    branch_anthropic: str
-    branch_openai: str
-    branch_google: str
+
+
+class Repo(BaseModel):
+    id: int
+    full_name: str
+    default_branch: str
+    added_at: str
+
+
+class RepoAdd(BaseModel):
+    full_name: str  # e.g. "owner/repo"
+
+
+class GitHubRepoInfo(BaseModel):
+    full_name: str
+    description: str | None = None
+    default_branch: str
+    private: bool
+    language: str | None = None
+    html_url: str
 
 
 class HealthResponse(BaseModel):
@@ -205,6 +220,34 @@ class ApiRemediationRequest(BaseModel):
     alert_numbers: list[int]
 
 
+class CopilotAutofixRequest(BaseModel):
+    alert_numbers: list[int]
+    batch_size: int | None = None  # None → use BATCH_SIZE env var
+
+
+class CopilotAutofixJob(BaseModel):
+    id: int
+    alert_number: int
+    rule_id: str
+    file_path: str
+    status: str
+    autofix_status: str | None = None
+    commit_sha: str | None = None
+    description: str | None = None
+    error_message: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class CopilotAutofixResponse(BaseModel):
+    total_alerts: int
+    completed: int
+    failed: int
+    skipped: int
+    jobs: list[CopilotAutofixJob]
+    message: str
+
+
 class ApiRemediationResponse(BaseModel):
     tool: str
     total_alerts: int
@@ -226,6 +269,7 @@ class ReplayEvent(BaseModel):
     detail: str
     alert_number: int | None = None
     timestamp_offset_ms: int
+    metadata: dict[str, object] = {}
     created_at: str
 
 
@@ -237,6 +281,7 @@ class ReplayRun(BaseModel):
     ended_at: str | None = None
     status: str
     tools: list[str]
+    branch_name: str | None = None
 
 
 class ReplayRunWithEvents(ReplayRun):

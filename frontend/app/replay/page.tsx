@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { api, type ReplayRunWithEvents, type ReplayRun, type ReplayEvent } from "@/lib/api";
+import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,7 +55,38 @@ const EVENT_ICONS: Record<string, string> = {
   patch_generated: "🔧",
   patch_applied: "📝",
   alert_triaged: "📋",
+  alert_skipped: "⏭️",
+  error: "❌",
 };
+
+function MetadataBadges({ metadata }: { metadata: Record<string, unknown> }) {
+  if (!metadata || Object.keys(metadata).length === 0) return null;
+
+  const badges: { label: string; value: string }[] = [];
+
+  if (metadata.model) badges.push({ label: "Model", value: String(metadata.model) });
+  if (metadata.latency_ms != null) badges.push({ label: "Latency", value: `${metadata.latency_ms}ms` });
+  if (metadata.input_tokens != null) badges.push({ label: "In", value: `${Number(metadata.input_tokens).toLocaleString()} tok` });
+  if (metadata.output_tokens != null) badges.push({ label: "Out", value: `${Number(metadata.output_tokens).toLocaleString()} tok` });
+  if (metadata.prompt_tokens != null) badges.push({ label: "Prompt", value: `${Number(metadata.prompt_tokens).toLocaleString()} tok` });
+  if (metadata.commit_sha) badges.push({ label: "Commit", value: String(metadata.commit_sha).slice(0, 8) });
+  if (metadata.severity) badges.push({ label: "Severity", value: String(metadata.severity) });
+  if (metadata.branch) badges.push({ label: "Branch", value: String(metadata.branch) });
+  if (metadata.completed != null) badges.push({ label: "Fixed", value: String(metadata.completed) });
+  if (metadata.failed != null) badges.push({ label: "Failed", value: String(metadata.failed) });
+
+  if (badges.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {badges.map((b) => (
+        <span key={b.label} className="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono">
+          <span className="text-muted-foreground">{b.label}:</span> {b.value}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -65,6 +98,7 @@ function formatDuration(ms: number): string {
 function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: number }) {
   const leftPct = maxOffset > 0 ? (event.timestamp_offset_ms / maxOffset) * 100 : 0;
   const icon = EVENT_ICONS[event.event_type] || "•";
+  const meta = event.metadata || {};
 
   return (
     <div
@@ -73,13 +107,17 @@ function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: nu
     >
       <div className="relative cursor-pointer">
         <span className="text-sm">{icon}</span>
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-64">
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80">
           <div className="rounded-lg border bg-popover p-3 text-xs shadow-md">
             <p className="font-medium">{event.event_type.replace(/_/g, " ")}</p>
             <p className="text-muted-foreground mt-1">{event.detail}</p>
             {event.alert_number && (
               <p className="text-muted-foreground">Alert #{event.alert_number}</p>
             )}
+            {"file_path" in meta && meta.file_path != null && (
+              <p className="text-muted-foreground font-mono truncate">{String(meta.file_path)}</p>
+            )}
+            <MetadataBadges metadata={meta} />
             <p className="text-muted-foreground mt-1">
               T+{formatDuration(event.timestamp_offset_ms)}
             </p>
@@ -221,26 +259,44 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
 
       {/* Live Counters */}
       <div className="grid gap-4 md:grid-cols-3">
-        {run.tools.map((tool) => (
-          <Card key={tool} className={`border-l-4 ${TOOL_BORDER_COLORS[tool] || "border-gray-500"}`}>
-            <CardContent className="pt-4 pb-4">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className={`font-medium ${TOOL_TEXT_COLORS[tool] || ""}`}>
-                    {TOOL_LABELS[tool] || tool}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {latestPerTool[tool]?.event_type.replace(/_/g, " ") || "Waiting..."}
-                  </p>
+        {run.tools.map((tool) => {
+          // Aggregate token/latency stats from visible events for this tool
+          const toolVisible = visibleEvents.filter((e) => e.tool === tool);
+          const totalTokens = toolVisible.reduce((sum, e) => {
+            const m = e.metadata || {};
+            return sum + (Number(m.input_tokens) || 0) + (Number(m.output_tokens) || 0);
+          }, 0);
+          const totalLatency = toolVisible.reduce((sum, e) => {
+            return sum + (Number(e.metadata?.latency_ms) || 0);
+          }, 0);
+
+          return (
+            <Card key={tool} className={`border-l-4 ${TOOL_BORDER_COLORS[tool] || "border-gray-500"}`}>
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className={`font-medium ${TOOL_TEXT_COLORS[tool] || ""}`}>
+                      {TOOL_LABELS[tool] || tool}
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {latestPerTool[tool]?.event_type.replace(/_/g, " ") || "Waiting..."}
+                    </p>
+                    {totalTokens > 0 && (
+                      <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                        {totalTokens.toLocaleString()} tokens
+                        {totalLatency > 0 && ` · ${formatDuration(totalLatency)} LLM time`}
+                      </p>
+                    )}
+                  </div>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold">{fixCounts[tool] || 0}</p>
+                    <p className="text-xs text-muted-foreground">fixes</p>
+                  </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-2xl font-bold">{fixCounts[tool] || 0}</p>
-                  <p className="text-xs text-muted-foreground">fixes</p>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
 
       {/* Timeline Lanes */}
@@ -303,21 +359,27 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
         </CardHeader>
         <CardContent>
           <div className="max-h-96 overflow-y-auto space-y-1">
-            {visibleEvents.map((event) => (
-              <div
-                key={event.id}
-                className="flex items-start gap-3 py-1.5 text-sm"
-              >
-                <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
-                  +{formatDuration(event.timestamp_offset_ms)}
-                </span>
-                <span className={`font-medium w-20 shrink-0 ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
-                  {TOOL_LABELS[event.tool] || event.tool}
-                </span>
-                <span className="w-4">{EVENT_ICONS[event.event_type] || "•"}</span>
-                <span className="text-muted-foreground flex-1">{event.detail}</span>
-              </div>
-            ))}
+            {visibleEvents.map((event) => {
+              const meta = event.metadata || {};
+              return (
+                <div
+                  key={event.id}
+                  className="flex items-start gap-3 py-1.5 text-sm"
+                >
+                  <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
+                    +{formatDuration(event.timestamp_offset_ms)}
+                  </span>
+                  <span className={`font-medium w-20 shrink-0 ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
+                    {TOOL_LABELS[event.tool] || event.tool}
+                  </span>
+                  <span className="w-4">{EVENT_ICONS[event.event_type] || "•"}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-muted-foreground">{event.detail}</span>
+                    <MetadataBadges metadata={meta} />
+                  </div>
+                </div>
+              );
+            })}
             {visibleEvents.length === 0 && (
               <p className="text-center text-muted-foreground py-4">
                 Press Play to start the replay
@@ -331,6 +393,7 @@ function PlaybackTimeline({ run }: { run: ReplayRunWithEvents }) {
 }
 
 export default function ReplayPage() {
+  const { selectedRepo } = useRepo();
   const [runs, setRuns] = useState<ReplayRun[]>([]);
   const [selectedRun, setSelectedRun] = useState<ReplayRunWithEvents | null>(null);
   const [loading, setLoading] = useState(false);
@@ -339,16 +402,17 @@ export default function ReplayPage() {
 
   const loadRuns = useCallback(async () => {
     try {
-      const data = await api.listReplayRuns();
+      const data = await api.listReplayRuns(selectedRepo);
       setRuns(data);
     } catch {
       // Ignore errors on initial load
     }
-  }, []);
+  }, [selectedRepo]);
 
   useEffect(() => {
-    loadRuns();
-  }, [loadRuns]);
+    setSelectedRun(null);
+    if (selectedRepo) loadRuns();
+  }, [loadRuns, selectedRepo]);
 
   const loadRun = async (runId: number) => {
     setLoading(true);
@@ -367,7 +431,7 @@ export default function ReplayPage() {
     setSeeding(true);
     setError(null);
     try {
-      const result = await api.seedDemoReplay();
+      const result = await api.seedDemoReplay(selectedRepo);
       await loadRuns();
       await loadRun(result.run_id);
     } catch (e) {
@@ -376,6 +440,18 @@ export default function ReplayPage() {
       setSeeding(false);
     }
   };
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to view replays.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
