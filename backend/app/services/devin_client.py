@@ -1,13 +1,22 @@
+import asyncio
+import logging
+
 import httpx
 
 from app.config import settings
 from app.models.schemas import Alert
 
+logger = logging.getLogger(__name__)
+
+# Retry configuration for 429 rate limits
+_MAX_RETRIES = 5
+_BASE_BACKOFF_SECONDS = 5.0
+
 
 class DevinClient:
     """Client for the Devin v3 Organization API.
 
-    Uses /v3beta1/organizations/{org_id}/sessions endpoints.
+    Uses /v3/organizations/{org_id}/sessions endpoints.
     Requires DEVIN_API_KEY (service user credential) and DEVIN_ORG_ID.
     """
 
@@ -75,39 +84,69 @@ class DevinClient:
             f"Address the root cause of each issue."
         )
 
+    async def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        **kwargs: object,
+    ) -> httpx.Response:
+        """Make an HTTP request with retry on 429 rate limits."""
+        for attempt in range(_MAX_RETRIES):
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.request(method, url, **kwargs)
+
+            if response.status_code != 429:
+                response.raise_for_status()
+                return response
+
+            # Respect Retry-After header if present, else exponential backoff
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                wait = float(retry_after)
+            else:
+                wait = _BASE_BACKOFF_SECONDS * (2 ** attempt)
+
+            logger.warning(
+                "Devin API 429 rate limited (attempt %d/%d), retrying in %.1fs",
+                attempt + 1, _MAX_RETRIES, wait,
+            )
+            await asyncio.sleep(wait)
+
+        # Final attempt — let it raise on any error
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.request(method, url, **kwargs)
+        response.raise_for_status()
+        return response
+
     async def create_remediation_session(self, alert: Alert, repo: str, branch: str) -> dict:
         """Create a Devin session to fix a specific alert."""
         prompt = self._build_prompt(alert, repo, branch)
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self._sessions_url,
-                headers=self.headers,
-                json={
-                    "prompt": prompt,
-                    "repos": [repo],
-                },
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request_with_retry(
+            "POST",
+            self._sessions_url,
+            headers=self.headers,
+            json={
+                "prompt": prompt,
+                "repos": [repo],
+            },
+        )
+        return response.json()
 
     async def create_grouped_session(
         self, alerts: list[Alert], repo: str, branch: str,
     ) -> dict:
         """Create a Devin session to fix multiple alerts in the same file."""
         prompt = self._build_grouped_prompt(alerts, repo, branch)
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                self._sessions_url,
-                headers=self.headers,
-                json={
-                    "prompt": prompt,
-                    "repos": [repo],
-                },
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request_with_retry(
+            "POST",
+            self._sessions_url,
+            headers=self.headers,
+            json={
+                "prompt": prompt,
+                "repos": [repo],
+            },
+        )
+        return response.json()
 
     async def get_session_status(self, session_id: str) -> dict:
         """Get the status of a Devin session.
@@ -115,20 +154,18 @@ class DevinClient:
         v3 response includes: session_id, status, acus_consumed,
         pull_requests [{pr_url, pr_state}], url, etc.
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{self._sessions_url}/{session_id}",
-                headers=self.headers,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._request_with_retry(
+            "GET",
+            f"{self._sessions_url}/{session_id}",
+            headers=self.headers,
+        )
+        return response.json()
 
     async def send_message(self, session_id: str, message: str) -> None:
         """Send a message to an existing Devin session."""
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self._sessions_url}/{session_id}/messages",
-                headers=self.headers,
-                json={"message": message},
-            )
-            response.raise_for_status()
+        await self._request_with_retry(
+            "POST",
+            f"{self._sessions_url}/{session_id}/messages",
+            headers=self.headers,
+            json={"message": message},
+        )

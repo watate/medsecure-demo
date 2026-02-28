@@ -1407,7 +1407,11 @@ async def _benchmark_devin(
     sessions_created = 0
 
     try:
-        for file_path, file_alerts in file_groups.items():
+        for idx, (file_path, file_alerts) in enumerate(file_groups.items()):
+            # Stagger Devin session creation to avoid 429 rate limits
+            if idx > 0:
+                await asyncio.sleep(3.0)
+
             try:
                 await recorder.record(
                     tool="devin",
