@@ -57,6 +57,6 @@ async def health() -> HealthResponse:
     return HealthResponse(
         status="ok",
         version="0.1.0",
-        repo=settings.github_repo,
+        repo="(select a repo in the UI)",
         database=settings.database_path,
     )

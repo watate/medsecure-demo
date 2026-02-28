@@ -642,9 +642,9 @@ async def trigger_api_remediation(
         # Fetch all jobs we created/touched for the response
         cursor = await db.execute(
             """SELECT * FROM api_remediation_jobs
-               WHERE tool = ? AND alert_number IN ({})
+               WHERE repo = ? AND tool = ? AND alert_number IN ({})
                ORDER BY created_at DESC""".format(",".join("?" * len(request.alert_numbers))),
-            (tool, *request.alert_numbers),
+            (resolved_repo, tool, *request.alert_numbers),
         )
         rows = await cursor.fetchall()
         jobs = [

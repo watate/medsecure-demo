@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
+import Link from "next/link";
 import { api, type Alert, type AlertsResponse } from "@/lib/api";
 import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -129,6 +130,7 @@ export default function AlertsPage() {
 
   // Re-fetch when tool, state, or repo changes
   useEffect(() => {
+    if (!selectedRepo) return;
     const cached = cacheRef.current[cacheKey];
     if (cached) {
       setAlerts(cached);
@@ -163,6 +165,18 @@ export default function AlertsPage() {
     }) ?? [];
 
   const showSkeleton = loading && !alerts;
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to view alerts.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

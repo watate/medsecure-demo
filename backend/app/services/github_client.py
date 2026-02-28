@@ -15,7 +15,7 @@ class GitHubClient:
 
     def __init__(self, token: str | None = None, repo: str | None = None):
         self.token = token or settings.github_token
-        self.repo = repo or settings.github_repo
+        self.repo = repo or ""
         self.headers = {
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {self.token}",

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { api, type ReportData } from "@/lib/api";
 import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -548,6 +549,18 @@ export default function ReportsPage() {
       setLoadingLatest(false);
     }
   };
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to generate reports.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

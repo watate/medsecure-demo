@@ -2,25 +2,40 @@
 
 import json
 
+from fastapi import HTTPException
+
 from app.config import settings
 from app.services.database import get_db
 
 
 async def resolve_repo(repo: str | None) -> str:
-    """Resolve repo: explicit param > first tracked repo > settings fallback."""
-    if repo:
-        return repo
+    """Resolve the active repo.
+
+    We intentionally do not fall back to an env default or "first tracked repo".
+    The caller must provide `repo` explicitly (selected in the UI).
+    """
+    if not repo:
+        raise HTTPException(
+            status_code=400,
+            detail="repo query parameter is required. Select a repo in the UI.",
+        )
+
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT full_name FROM repos ORDER BY added_at ASC LIMIT 1"
+            "SELECT full_name FROM repos WHERE full_name = ? LIMIT 1",
+            (repo,),
         )
         row = await cursor.fetchone()
-        if row:
-            return row["full_name"]
+        if not row:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Repo '{repo}' is not tracked. Add it on /repos.",
+            )
+        return row["full_name"]
     finally:
         await db.close()
-    return settings.github_repo
+
 
 
 async def resolve_baseline_branch(repo: str) -> str:

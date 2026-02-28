@@ -4,7 +4,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     # GitHub
     github_token: str = ""
-    github_repo: str = "watate/tomcat"
+    # No default repo fallback — UI must select a tracked repo
+    github_repo: str = ""
 
     # Default baseline branch
     branch_baseline: str = "main"

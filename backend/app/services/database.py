@@ -184,10 +184,6 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE devin_sessions ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
             )
-            await db.execute(
-                "UPDATE devin_sessions SET repo = ? WHERE repo = ''",
-                (settings.github_repo,),
-            )
 
         cursor = await db.execute("PRAGMA table_info(api_remediation_jobs)")
         ar_columns = {row[1] for row in await cursor.fetchall()}
@@ -195,20 +191,12 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE api_remediation_jobs ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
             )
-            await db.execute(
-                "UPDATE api_remediation_jobs SET repo = ? WHERE repo = ''",
-                (settings.github_repo,),
-            )
 
         cursor = await db.execute("PRAGMA table_info(copilot_autofix_jobs)")
         ca_columns = {row[1] for row in await cursor.fetchall()}
         if "repo" not in ca_columns:
             await db.execute(
                 "ALTER TABLE copilot_autofix_jobs ADD COLUMN repo TEXT NOT NULL DEFAULT ''"
-            )
-            await db.execute(
-                "UPDATE copilot_autofix_jobs SET repo = ? WHERE repo = ''",
-                (settings.github_repo,),
             )
 
         # Migrate devin_sessions: remove UNIQUE constraint on session_id
@@ -235,7 +223,11 @@ async def init_db() -> None:
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
                 INSERT INTO devin_sessions_new
-                    SELECT * FROM devin_sessions;
+                    (id, repo, session_id, alert_number, rule_id,
+                     file_path, status, pr_url, created_at, updated_at)
+                    SELECT id, repo, session_id, alert_number, rule_id,
+                           file_path, status, pr_url, created_at, updated_at
+                    FROM devin_sessions;
                 DROP TABLE devin_sessions;
                 ALTER TABLE devin_sessions_new
                     RENAME TO devin_sessions;

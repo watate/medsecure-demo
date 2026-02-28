@@ -63,12 +63,15 @@ export function RepoProvider({ children }: { children: React.ReactNode }) {
     }
   }, [hydrated, refreshTrackedRepos]);
 
-  // If the selected repo is no longer in the tracked list, auto-select the first one
+  // If the stored repo was removed from the tracked list, clear the selection
+  // so the user is forced to pick again — no automatic fallback.
   useEffect(() => {
-    if (!hydrated || loading || trackedRepos.length === 0) return;
-    const found = trackedRepos.some((r) => r.full_name === selectedRepo);
-    if (!found) {
-      setSelectedRepo(trackedRepos[0].full_name);
+    if (!hydrated || loading || !selectedRepo) return;
+    if (trackedRepos.length > 0) {
+      const found = trackedRepos.some((r) => r.full_name === selectedRepo);
+      if (!found) {
+        setSelectedRepo(null);
+      }
     }
   }, [hydrated, loading, trackedRepos, selectedRepo, setSelectedRepo]);
 

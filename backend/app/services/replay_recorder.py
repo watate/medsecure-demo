@@ -10,7 +10,6 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from app.config import settings
 from app.services.database import get_db
 
 logger = logging.getLogger(__name__)
@@ -45,7 +44,7 @@ class ReplayRecorder:
         self.tools = tools
         self.scan_id = scan_id
         self.branch_name = branch_name
-        self.repo = repo or settings.github_repo
+        self.repo = repo or ""
         self.run_id: int | None = None
         self._start_time: float = 0.0
 

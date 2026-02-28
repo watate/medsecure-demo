@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import {
   api,
   type Alert,
@@ -108,11 +109,12 @@ export default function RemediationPage() {
   }, [selectedRepo]);
 
   useEffect(() => {
+    if (!selectedRepo) return;
     loadBaselineAlerts();
     loadCostEstimates();
     loadApiJobs();
     loadSessions();
-  }, [loadBaselineAlerts, loadCostEstimates, loadApiJobs, loadSessions]);
+  }, [selectedRepo, loadBaselineAlerts, loadCostEstimates, loadApiJobs, loadSessions]);
 
   // Selection handlers
   const toggleAlert = (alertNumber: number) => {
@@ -181,6 +183,18 @@ export default function RemediationPage() {
   const runningSessions = sessions.filter((s) => s.status === "running");
   const completedSessions = sessions.filter((s) => s.status === "completed");
   const failedSessions = sessions.filter((s) => s.status === "failed" || s.status === "stopped");
+
+  if (!selectedRepo) {
+    return (
+      <div className="flex flex-col items-center justify-center py-24 space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">No repo selected</h1>
+        <p className="text-muted-foreground">Add and select a repository to run remediation.</p>
+        <Link href="/repos">
+          <Button>Go to Repos</Button>
+        </Link>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">

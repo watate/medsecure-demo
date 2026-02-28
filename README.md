@@ -50,7 +50,7 @@ Or a classic PAT with scopes: `repo`, `security_events`.
 ```bash
 # Backend
 cp backend/.env.example backend/.env
-# Edit backend/.env — set GITHUB_TOKEN, GITHUB_REPO, DEVIN_API_KEY, etc.
+# Edit backend/.env — set GITHUB_TOKEN, DEVIN_API_KEY, and LLM keys as needed
 
 # Frontend
 cp frontend/.env.example frontend/.env
@@ -155,7 +155,6 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GITHUB_TOKEN` | Yes | GitHub PAT with code scanning access |
-| `GITHUB_REPO` | Yes | Target repo (e.g. `owner/repo`) |
 | `DEVIN_API_KEY` | For remediation | Devin API key |
 | `AUTH_DB_PATH` | No | Path to better-auth SQLite database (default: `../frontend/auth.db`) |
 | `BATCH_SIZE` | No | Max file groups per batch in remediation (default: `10`) |
@@ -178,3 +177,4 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 - Anthropic model pricing: [https://platform.claude.com/docs/en/about-claude/models/overview](https://platform.claude.com/docs/en/about-claude/models/overview)
 - GPT-5.3-Codex pricing: [https://developers.openai.com/api/docs/models/gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex)
 - gemini-3.1-pro-preview pricing: [https://ai.google.dev/gemini-api/docs/pricing](https://ai.google.dev/gemini-api/docs/pricing)
+
