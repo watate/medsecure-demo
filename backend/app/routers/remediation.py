@@ -69,8 +69,8 @@ async def trigger_devin_remediation(
     Creates a fresh branch from main via GitHub API, groups alerts by file,
     and creates one Devin session per file with all grouped alerts as context.
     """
-    if not settings.devin_api_key:
-        raise HTTPException(status_code=400, detail="DEVIN_API_KEY not configured")
+    if not settings.devin_api_key or not settings.devin_org_id:
+        raise HTTPException(status_code=400, detail="DEVIN_API_KEY and DEVIN_ORG_ID must be configured")
 
     resolved_repo = await resolve_repo(repo)
     baseline_branch = await resolve_baseline_branch(resolved_repo)
@@ -744,8 +744,8 @@ async def refresh_devin_sessions(
     repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> dict:
     """Refresh status of running Devin sessions for a repo."""
-    if not settings.devin_api_key:
-        raise HTTPException(status_code=400, detail="DEVIN_API_KEY not configured")
+    if not settings.devin_api_key or not settings.devin_org_id:
+        raise HTTPException(status_code=400, detail="DEVIN_API_KEY and DEVIN_ORG_ID must be configured")
 
     devin = DevinClient()
     db = await get_db()
