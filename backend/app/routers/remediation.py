@@ -2520,7 +2520,7 @@ async def trigger_regression_tests(
     resolved_repo = await resolve_repo(repo)
 
     # Resolve tool branches
-    if request.run_id:
+    if request.run_id is not None:
         # Get branches from a specific benchmark run's replay events
         db = await get_db()
         try:
