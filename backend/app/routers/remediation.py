@@ -1598,7 +1598,7 @@ async def _benchmark_devin(
 
                             # Compute cost from ACUs consumed
                             acus = status_data.get("acus_consumed")
-                            cost = compute_devin_session_cost(acus) if acus else None
+                            cost = compute_devin_session_cost(acus) if acus else 0.0
 
                             await recorder.record(
                                 tool="devin",
@@ -1886,6 +1886,7 @@ async def _run_benchmark_tasks(
     import time as _time_mod
     run_start_time = _time_mod.monotonic()
 
+    had_exception = False
     try:
         github = GitHubClient(repo=resolved_repo)
 
@@ -2037,11 +2038,17 @@ async def _run_benchmark_tasks(
 
     except Exception:
         logger.exception("Benchmark %d: _run_benchmark_tasks failed", run_id)
+        had_exception = True
     finally:
         # Always clean up cancel event and mark the run as finished
         _cancel_events.pop(run_id, None)
 
-        final_status = "cancelled" if (cancel_event and cancel_event.is_set()) else "completed"
+        if cancel_event and cancel_event.is_set():
+            final_status = "cancelled"
+        elif had_exception:
+            final_status = "failed"
+        else:
+            final_status = "completed"
         db = await get_db()
         try:
             now = datetime.now(timezone.utc).isoformat()
