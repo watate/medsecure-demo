@@ -57,7 +57,7 @@ def _extract_code_from_response(text: str) -> str:
     wrap it in markdown code fences. Strip those if present.
     """
     # Try to extract content from code fences
-    fence_match = re.search(r"```(?:\w+)?\n(.*)```", text, re.DOTALL)
+    fence_match = re.search(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     if fence_match:
         return fence_match.group(1).rstrip("\n")
     # If no fences, return the raw text (trimmed)

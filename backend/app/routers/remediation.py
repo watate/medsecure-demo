@@ -180,6 +180,9 @@ async def trigger_devin_remediation(request: RemediationRequest) -> RemediationR
             sessions=sessions_created,
             message=f"Created {len(sessions_created)} Devin sessions for {len(alerts)} alerts",
         )
+    except Exception:
+        await recorder.finish("failed")
+        raise
     finally:
         await db.close()
 
@@ -488,6 +491,9 @@ async def trigger_api_remediation(request: ApiRemediationRequest) -> ApiRemediat
             jobs=jobs,
             message=f"Remediation complete: {completed} fixed, {failed} failed, {skipped} skipped",
         )
+    except Exception:
+        await recorder.finish("failed")
+        raise
     finally:
         await db.close()
 
