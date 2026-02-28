@@ -63,7 +63,7 @@ cp frontend/.env.example frontend/.env
 cd frontend
 npm install
 
-# Runs migrations + seeds a user (reads SEED_EMAIL/SEED_PASSWORD from .env)
+# Runs migrations + seeds a user (reads SEED_EMAIL/SEED_PASSWORD from frontend/.env)
 npm run setup
 ```
 
