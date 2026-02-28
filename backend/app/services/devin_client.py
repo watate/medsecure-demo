@@ -9,8 +9,9 @@ from app.models.schemas import Alert
 logger = logging.getLogger(__name__)
 
 # Retry configuration for 429 rate limits
-_MAX_RETRIES = 5
-_BASE_BACKOFF_SECONDS = 5.0
+_MAX_RETRIES = 10
+_BASE_BACKOFF_SECONDS = 10.0
+_MAX_BACKOFF_SECONDS = 320.0
 
 
 class DevinClient:
@@ -103,9 +104,9 @@ class DevinClient:
             # Respect Retry-After header if present, else exponential backoff
             retry_after = response.headers.get("Retry-After")
             if retry_after:
-                wait = float(retry_after)
+                wait = min(float(retry_after), _MAX_BACKOFF_SECONDS)
             else:
-                wait = _BASE_BACKOFF_SECONDS * (2 ** attempt)
+                wait = min(_BASE_BACKOFF_SECONDS * (2 ** attempt), _MAX_BACKOFF_SECONDS)
 
             logger.warning(
                 "Devin API 429 rate limited (attempt %d/%d), retrying in %.1fs",

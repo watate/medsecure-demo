@@ -331,6 +331,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ severities }),
     }),
+  cancelBenchmark: (runId: number, repo?: string | null) =>
+    fetchApi<{ status: string; run_id: number }>(
+      `/api/remediate/benchmark/${runId}/cancel${qs({ repo })}`,
+      { method: "POST" },
+    ),
 
   // Replay
   listReplayRuns: (repo?: string | null) =>

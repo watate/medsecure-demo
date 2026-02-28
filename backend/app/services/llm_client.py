@@ -43,8 +43,10 @@ ANTHROPIC_API_URL = "https://api.anthropic.com/v1/messages"
 OPENAI_API_URL = "https://api.openai.com/v1/responses"
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
-# Timeout for LLM API calls (generous — large files can take a while)
-LLM_TIMEOUT = 120.0
+# Timeout for LLM API calls — large files can take several minutes to process.
+# Use a longer read timeout since LLMs may take a while to generate a response,
+# while connect/write/pool timeouts stay shorter.
+LLM_TIMEOUT = httpx.Timeout(connect=30.0, read=300.0, write=30.0, pool=30.0)
 
 # Delay between sequential API calls (seconds) to avoid rate limits
 INTER_CALL_DELAY = 2.0
