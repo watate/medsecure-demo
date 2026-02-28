@@ -1,64 +1,457 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import {
   api,
   type Alert,
-  type DevinSession,
-  type ApiRemediationJob,
-  type ApiRemediationResponse,
   type ComparisonResult,
+  type ReplayRunWithEvents,
+  type ReplayEvent,
 } from "@/lib/api";
 import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 
-const STATUS_VARIANTS: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  running: "default",
-  pending: "default",
-  completed: "secondary",
-  failed: "destructive",
-  blocked: "outline",
-  stopped: "outline",
+// ---------------------------------------------------------------------------
+// Constants (mirrored from replay page for consistency)
+// ---------------------------------------------------------------------------
+
+const TOOL_COLORS: Record<string, string> = {
+  devin: "bg-emerald-500",
+  copilot: "bg-blue-500",
+  anthropic: "bg-orange-500",
+  openai: "bg-violet-500",
+  gemini: "bg-pink-500",
 };
 
-const API_TOOLS = [
-  { key: "anthropic", label: "Anthropic", model: "claude-opus-4-6", color: "bg-orange-500" },
-  { key: "openai", label: "OpenAI", model: "gpt-5.3-codex", color: "bg-violet-500" },
-  { key: "gemini", label: "Google", model: "gemini-3.1-pro-preview", color: "bg-pink-500" },
+const TOOL_TEXT_COLORS: Record<string, string> = {
+  devin: "text-emerald-600",
+  copilot: "text-blue-600",
+  anthropic: "text-orange-600",
+  openai: "text-violet-600",
+  gemini: "text-pink-600",
+};
+
+const TOOL_BORDER_COLORS: Record<string, string> = {
+  devin: "border-emerald-500",
+  copilot: "border-blue-500",
+  anthropic: "border-orange-500",
+  openai: "border-violet-500",
+  gemini: "border-pink-500",
+};
+
+const TOOL_LABELS: Record<string, string> = {
+  devin: "Devin",
+  copilot: "Copilot Autofix",
+  anthropic: "Anthropic (claude-opus-4-6)",
+  openai: "OpenAI (gpt-5.3-codex)",
+  gemini: "Google (gemini-3.1-pro-preview)",
+};
+
+const EVENT_ICONS: Record<string, string> = {
+  scan_started: "\ud83d\udd0d",
+  session_created: "\ud83d\ude80",
+  analyzing: "\ud83d\udd2c",
+  fix_pushed: "\u2705",
+  codeql_verified: "\ud83d\udee1\ufe0f",
+  batch_complete: "\ud83d\udce6",
+  remediation_complete: "\ud83c\udfc1",
+  suggestion_created: "\ud83d\udca1",
+  waiting_human: "\u23f3",
+  suggestion_accepted: "\ud83d\udc64",
+  api_call_sent: "\ud83d\udce1",
+  patch_generated: "\ud83d\udd27",
+  patch_applied: "\ud83d\udcdd",
+  alert_triaged: "\ud83d\udccb",
+  alert_skipped: "\u23ed\ufe0f",
+  autofix_triggered: "\ud83e\udd16",
+  autofix_result: "\ud83d\udcca",
+  error: "\u274c",
+};
+
+const SEVERITY_CONFIG = [
+  { key: "critical", label: "Critical", color: "bg-red-500", borderColor: "border-red-500" },
+  { key: "high", label: "High", color: "bg-orange-500", borderColor: "border-orange-500" },
+  { key: "medium", label: "Medium", color: "bg-yellow-500", borderColor: "border-yellow-500" },
+  { key: "low", label: "Low", color: "bg-blue-500", borderColor: "border-blue-500" },
 ];
 
-function getSeverityVariant(severity: string): "default" | "secondary" | "destructive" | "outline" {
-  if (severity === "critical" || severity === "high") return "destructive";
-  if (severity === "medium") return "secondary";
-  return "outline";
+const POLL_INTERVAL_MS = 3000;
+
+// ---------------------------------------------------------------------------
+// Helper components
+// ---------------------------------------------------------------------------
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 3600000) return `${(ms / 60000).toFixed(1)}min`;
+  return `${(ms / 3600000).toFixed(1)}hr`;
 }
+
+function MetadataBadges({ metadata }: { metadata: Record<string, unknown> }) {
+  if (!metadata || Object.keys(metadata).length === 0) return null;
+
+  const badges: { label: string; value: string }[] = [];
+
+  if (metadata.model) badges.push({ label: "Model", value: String(metadata.model) });
+  if (metadata.latency_ms != null) badges.push({ label: "Latency", value: `${metadata.latency_ms}ms` });
+  if (metadata.input_tokens != null) badges.push({ label: "In", value: `${Number(metadata.input_tokens).toLocaleString()} tok` });
+  if (metadata.output_tokens != null) badges.push({ label: "Out", value: `${Number(metadata.output_tokens).toLocaleString()} tok` });
+  if (metadata.prompt_tokens != null) badges.push({ label: "Prompt", value: `${Number(metadata.prompt_tokens).toLocaleString()} tok` });
+  if (metadata.event_cost_usd != null && Number(metadata.event_cost_usd) > 0)
+    badges.push({ label: "Cost", value: `$${Number(metadata.event_cost_usd).toFixed(4)}` });
+  if (metadata.cumulative_cost_usd != null && Number(metadata.cumulative_cost_usd) > 0)
+    badges.push({ label: "Running Total", value: `$${Number(metadata.cumulative_cost_usd).toFixed(4)}` });
+  if (metadata.commit_sha) badges.push({ label: "Commit", value: String(metadata.commit_sha).slice(0, 8) });
+  if (metadata.severity) badges.push({ label: "Severity", value: String(metadata.severity) });
+  if (metadata.branch) badges.push({ label: "Branch", value: String(metadata.branch) });
+  if (metadata.completed != null) badges.push({ label: "Fixed", value: String(metadata.completed) });
+  if (metadata.failed != null) badges.push({ label: "Failed", value: String(metadata.failed) });
+
+  if (badges.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {badges.map((b) => (
+        <span key={b.label} className="inline-flex items-center gap-0.5 rounded bg-muted px-1.5 py-0.5 text-[10px] font-mono">
+          <span className="text-muted-foreground">{b.label}:</span> {b.value}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function TimelineEvent({ event, maxOffset }: { event: ReplayEvent; maxOffset: number }) {
+  const leftPct = maxOffset > 0 ? (event.timestamp_offset_ms / maxOffset) * 100 : 0;
+  const icon = EVENT_ICONS[event.event_type] || "\u2022";
+  const meta = event.metadata || {};
+
+  return (
+    <div
+      className="absolute group"
+      style={{ left: `${Math.min(leftPct, 98)}%`, top: 0 }}
+    >
+      <div className="relative cursor-pointer">
+        <span className="text-sm">{icon}</span>
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 w-80">
+          <div className="rounded-lg border bg-popover p-3 text-xs shadow-md">
+            <p className="font-medium">{event.event_type.replace(/_/g, " ")}</p>
+            <p className="text-muted-foreground mt-1">{event.detail}</p>
+            {event.alert_number && (
+              <p className="text-muted-foreground">Alert #{event.alert_number}</p>
+            )}
+            {"file_path" in meta && meta.file_path != null && (
+              <p className="text-muted-foreground font-mono truncate">{String(meta.file_path)}</p>
+            )}
+            <MetadataBadges metadata={meta} />
+            <p className="text-muted-foreground mt-1">
+              T+{formatDuration(event.timestamp_offset_ms)}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Live Replay View (auto-advance for live, full view when completed)
+// ---------------------------------------------------------------------------
+
+function LiveReplayView({ run, isLive }: { run: ReplayRunWithEvents; isLive: boolean }) {
+  const maxOffset = run.total_duration_ms || Math.max(...run.events.map((e) => e.timestamp_offset_ms), 1);
+  const logEndRef = useRef<HTMLDivElement>(null);
+
+  const visibleEvents = run.events;
+
+  // Count fixes per tool (deduplicate by alert_number)
+  const fixCounts: Record<string, number> = {};
+  for (const tool of run.tools) {
+    const fixedAlerts = new Set(
+      visibleEvents
+        .filter(
+          (e) =>
+            e.tool === tool &&
+            e.alert_number != null &&
+            (e.event_type === "fix_pushed" ||
+              e.event_type === "codeql_verified" ||
+              e.event_type === "suggestion_accepted" ||
+              e.event_type === "patch_applied")
+        )
+        .map((e) => e.alert_number)
+    );
+    fixCounts[tool] = fixedAlerts.size;
+  }
+
+  // Group events by tool
+  const eventsByTool: Record<string, ReplayEvent[]> = {};
+  for (const tool of run.tools) {
+    eventsByTool[tool] = run.events.filter((e) => e.tool === tool);
+  }
+
+  // Latest event per tool
+  const latestPerTool: Record<string, ReplayEvent | null> = {};
+  for (const tool of run.tools) {
+    const toolEvents = eventsByTool[tool] || [];
+    latestPerTool[tool] = toolEvents.length > 0 ? toolEvents[toolEvents.length - 1] : null;
+  }
+
+  // Running cost total
+  const totalCost = visibleEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+
+  // Determine tool completion status
+  const toolStatus = (tool: string): "running" | "completed" | "error" | "waiting" => {
+    const toolEvents = eventsByTool[tool] || [];
+    if (toolEvents.length === 0) return "waiting";
+    const last = toolEvents[toolEvents.length - 1];
+    if (last.event_type === "remediation_complete") return "completed";
+    if (last.event_type === "error" && toolEvents.length <= 2) return "error";
+    return "running";
+  };
+
+  // Auto-scroll event log in live mode
+  useEffect(() => {
+    if (isLive && logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [isLive, visibleEvents.length]);
+
+  return (
+    <div className="space-y-6">
+      {/* Status Bar */}
+      <Card>
+        <CardContent className="pt-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {isLive ? (
+                <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
+              ) : (
+                <Badge variant="secondary">Completed</Badge>
+              )}
+              <span className="text-sm text-muted-foreground">
+                {visibleEvents.length} events across {run.tools.length} tools
+              </span>
+            </div>
+            <div className="flex items-center gap-4">
+              {totalCost > 0 && (
+                <span className="text-sm font-mono font-semibold text-amber-600">
+                  ${totalCost.toFixed(4)}
+                </span>
+              )}
+              {run.total_cost_usd > 0 && run.total_cost_usd !== totalCost && (
+                <span className="text-xs text-muted-foreground font-mono">
+                  (Total: ${run.total_cost_usd.toFixed(4)})
+                </span>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Tool Cards */}
+      <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
+        {run.tools.map((tool) => {
+          const toolEvents = eventsByTool[tool] || [];
+          const totalTokens = toolEvents.reduce((sum, e) => {
+            const m = e.metadata || {};
+            return sum + (Number(m.input_tokens) || 0) + (Number(m.output_tokens) || 0);
+          }, 0);
+          const totalLatency = toolEvents.reduce((sum, e) => {
+            return sum + (Number(e.metadata?.latency_ms) || 0);
+          }, 0);
+          const toolCost = toolEvents.reduce((sum, e) => sum + (e.cost_usd || 0), 0);
+          const status = toolStatus(tool);
+
+          return (
+            <Card key={tool} className={`border-l-4 ${TOOL_BORDER_COLORS[tool] || "border-gray-500"}`}>
+              <CardContent className="pt-4 pb-4">
+                <div className="flex items-center justify-between">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className={`font-medium text-sm truncate ${TOOL_TEXT_COLORS[tool] || ""}`}>
+                        {TOOL_LABELS[tool] || tool}
+                      </p>
+                      {status === "running" && isLive && (
+                        <span className="relative flex h-2 w-2">
+                          <span className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${TOOL_COLORS[tool] || "bg-gray-500"}`} />
+                          <span className={`relative inline-flex rounded-full h-2 w-2 ${TOOL_COLORS[tool] || "bg-gray-500"}`} />
+                        </span>
+                      )}
+                      {status === "completed" && (
+                        <span className="text-xs text-emerald-600">\u2713</span>
+                      )}
+                      {status === "error" && (
+                        <span className="text-xs text-destructive">\u2717</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-0.5 truncate">
+                      {latestPerTool[tool]?.event_type.replace(/_/g, " ") || "Waiting..."}
+                    </p>
+                    {totalTokens > 0 && (
+                      <p className="text-[10px] text-muted-foreground font-mono mt-0.5">
+                        {totalTokens.toLocaleString()} tokens
+                        {totalLatency > 0 && ` \u00b7 ${formatDuration(totalLatency)} LLM`}
+                      </p>
+                    )}
+                    {toolCost > 0 && (
+                      <p className="text-[10px] font-mono mt-0.5 text-amber-600">
+                        ${toolCost.toFixed(4)} spent
+                      </p>
+                    )}
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="text-2xl font-bold">{fixCounts[tool] || 0}</p>
+                    <p className="text-xs text-muted-foreground">fixes</p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          );
+        })}
+      </div>
+
+      {/* Timeline Lanes */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Remediation Timeline</CardTitle>
+          <CardDescription>
+            {isLive ? "Events appear in real-time." : "Hover over events for details."} Each row represents a tool.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-6">
+            {run.tools.map((tool) => {
+              const toolEvents = eventsByTool[tool] || [];
+
+              return (
+                <div key={tool} className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-3 w-3 rounded-full ${TOOL_COLORS[tool] || "bg-gray-500"}`} />
+                    <span className="text-sm font-medium">{TOOL_LABELS[tool] || tool}</span>
+                    <Badge variant="outline" className="text-xs">
+                      {toolEvents.length} events
+                    </Badge>
+                  </div>
+                  <div className="relative h-8 bg-muted/50 rounded-md overflow-visible">
+                    {toolEvents.map((event) => (
+                      <TimelineEvent
+                        key={event.id}
+                        event={event}
+                        maxOffset={maxOffset}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Time markers */}
+          <div className="flex justify-between mt-2 text-xs text-muted-foreground">
+            <span>0s</span>
+            <span>{formatDuration(maxOffset * 0.25)}</span>
+            <span>{formatDuration(maxOffset * 0.5)}</span>
+            <span>{formatDuration(maxOffset * 0.75)}</span>
+            <span>{formatDuration(maxOffset)}</span>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Event Log */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Event Log</CardTitle>
+          <CardDescription>
+            {visibleEvents.length} events{isLive ? " (auto-scrolling)" : ""}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="max-h-96 overflow-y-auto space-y-1">
+            {visibleEvents.map((event) => {
+              const meta = event.metadata || {};
+              return (
+                <div
+                  key={event.id}
+                  className="flex items-start gap-3 py-1.5 text-sm"
+                >
+                  <span className="font-mono text-xs text-muted-foreground w-16 shrink-0">
+                    +{formatDuration(event.timestamp_offset_ms)}
+                  </span>
+                  <span className={`font-medium w-20 shrink-0 text-xs ${TOOL_TEXT_COLORS[event.tool] || ""}`}>
+                    {TOOL_LABELS[event.tool] || event.tool}
+                  </span>
+                  <span className="w-4">{EVENT_ICONS[event.event_type] || "\u2022"}</span>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-muted-foreground">{event.detail}</span>
+                    <MetadataBadges metadata={meta} />
+                  </div>
+                  {event.cost_usd > 0 && (
+                    <span className="text-xs font-mono text-amber-600 shrink-0">
+                      ${event.cost_usd.toFixed(4)}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {visibleEvents.length === 0 && (
+              <p className="text-center text-muted-foreground py-4">
+                Waiting for events...
+              </p>
+            )}
+            <div ref={logEndRef} />
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Page
+// ---------------------------------------------------------------------------
 
 export default function RemediationPage() {
   const { selectedRepo } = useRepo();
-  const [activeTab, setActiveTab] = useState("api");
 
-  // --- Devin state ---
-  const [sessions, setSessions] = useState<DevinSession[]>([]);
-  const [devinLoading, setDevinLoading] = useState(false);
-  const [devinTriggering, setDevinTriggering] = useState(false);
-  const [devinRefreshing, setDevinRefreshing] = useState(false);
-
-  // --- API Remediation state ---
+  // Setup state
   const [baselineAlerts, setBaselineAlerts] = useState<Alert[]>([]);
-  const [selectedAlerts, setSelectedAlerts] = useState<Set<number>>(new Set());
   const [alertsLoading, setAlertsLoading] = useState(false);
-  const [remediating, setRemediating] = useState<string | null>(null); // tool key or null
-  const [lastResult, setLastResult] = useState<ApiRemediationResponse | null>(null);
-  const [apiJobs, setApiJobs] = useState<ApiRemediationJob[]>([]);
+  const [selectedSeverities, setSelectedSeverities] = useState<Set<string>>(
+    new Set(["critical", "high", "medium", "low"])
+  );
   const [costEstimates, setCostEstimates] = useState<ComparisonResult["cost_estimates"]>(null);
-
   const [error, setError] = useState<string | null>(null);
 
-  // Load baseline open alerts for selection
+  // Benchmark state
+  const [benchmarkRunning, setBenchmarkRunning] = useState(false);
+  const [runId, setRunId] = useState<number | null>(null);
+  const [liveRun, setLiveRun] = useState<ReplayRunWithEvents | null>(null);
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Severity counts from baseline alerts
+  const severityCounts: Record<string, number> = {};
+  for (const alert of baselineAlerts) {
+    const sev = alert.severity.toLowerCase();
+    severityCounts[sev] = (severityCounts[sev] || 0) + 1;
+  }
+
+  // Filtered alert count
+  const filteredAlertCount = baselineAlerts.filter((a) =>
+    selectedSeverities.has(a.severity.toLowerCase())
+  ).length;
+
+  // Unique file count for filtered alerts
+  const filteredFiles = new Set(
+    baselineAlerts
+      .filter((a) => selectedSeverities.has(a.severity.toLowerCase()))
+      .map((a) => a.file_path)
+  );
+
+  // Load baseline alerts
   const loadBaselineAlerts = useCallback(async () => {
     setAlertsLoading(true);
     setError(null);
@@ -67,44 +460,19 @@ export default function RemediationPage() {
       setBaselineAlerts(data.alerts);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Failed to load alerts";
-      if (!msg.includes("404")) {
-        setError(msg);
-      }
+      if (!msg.includes("404")) setError(msg);
     } finally {
       setAlertsLoading(false);
     }
   }, [selectedRepo]);
 
-  // Load cost estimates for display
+  // Load cost estimates
   const loadCostEstimates = useCallback(async () => {
     try {
       const data = await api.compareLatest(selectedRepo);
       setCostEstimates(data.cost_estimates);
     } catch {
-      // Not critical — cost estimates are optional
-    }
-  }, [selectedRepo]);
-
-  // Load API remediation job history
-  const loadApiJobs = useCallback(async () => {
-    try {
-      const data = await api.listApiRemediationJobs(undefined, selectedRepo);
-      setApiJobs(data);
-    } catch {
       // Not critical
-    }
-  }, [selectedRepo]);
-
-  // Load Devin sessions
-  const loadSessions = useCallback(async () => {
-    setDevinLoading(true);
-    try {
-      const data = await api.listDevinSessions(selectedRepo);
-      setSessions(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load sessions");
-    } finally {
-      setDevinLoading(false);
     }
   }, [selectedRepo]);
 
@@ -112,77 +480,87 @@ export default function RemediationPage() {
     if (!selectedRepo) return;
     loadBaselineAlerts();
     loadCostEstimates();
-    loadApiJobs();
-    loadSessions();
-  }, [selectedRepo, loadBaselineAlerts, loadCostEstimates, loadApiJobs, loadSessions]);
+  }, [selectedRepo, loadBaselineAlerts, loadCostEstimates]);
 
-  // Selection handlers
-  const toggleAlert = (alertNumber: number) => {
-    setSelectedAlerts((prev) => {
+  // Poll for live run updates
+  useEffect(() => {
+    if (runId == null) return;
+
+    const poll = async () => {
+      try {
+        const data = await api.getReplayRun(runId);
+        setLiveRun(data);
+        if (data.status === "completed" || data.status === "failed") {
+          setBenchmarkRunning(false);
+          if (pollRef.current) {
+            clearInterval(pollRef.current);
+            pollRef.current = null;
+          }
+        }
+      } catch {
+        // Ignore transient errors during polling
+      }
+    };
+
+    // Initial fetch
+    poll();
+
+    // Start polling
+    pollRef.current = setInterval(poll, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollRef.current) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+    };
+  }, [runId]);
+
+  // Toggle severity checkbox
+  const toggleSeverity = (severity: string) => {
+    setSelectedSeverities((prev) => {
       const next = new Set(prev);
-      if (next.has(alertNumber)) {
-        next.delete(alertNumber);
+      if (next.has(severity)) {
+        next.delete(severity);
       } else {
-        next.add(alertNumber);
+        next.add(severity);
       }
       return next;
     });
   };
 
-  const toggleAll = () => {
-    if (selectedAlerts.size === baselineAlerts.length) {
-      setSelectedAlerts(new Set());
-    } else {
-      setSelectedAlerts(new Set(baselineAlerts.map((a) => a.number)));
-    }
-  };
-
-  // Trigger API remediation
-  const triggerApiRemediation = async (toolKey: string) => {
-    if (selectedAlerts.size === 0) return;
-    setRemediating(toolKey);
-    setLastResult(null);
+  // Run benchmark
+  const runBenchmark = async () => {
+    if (filteredAlertCount === 0) return;
+    setBenchmarkRunning(true);
+    setSetupCollapsed(true);
     setError(null);
+    setLiveRun(null);
+
     try {
-      const result = await api.triggerApiRemediation(toolKey, Array.from(selectedAlerts), selectedRepo);
-      setLastResult(result);
-      await loadApiJobs();
+      const result = await api.triggerBenchmark(
+        Array.from(selectedSeverities),
+        selectedRepo,
+      );
+      setRunId(result.run_id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Remediation failed");
-    } finally {
-      setRemediating(null);
+      setError(e instanceof Error ? e.message : "Failed to start benchmark");
+      setBenchmarkRunning(false);
+      setSetupCollapsed(false);
     }
   };
 
-  // Devin handlers
-  const triggerDevin = async () => {
-    setDevinTriggering(true);
-    setError(null);
-    try {
-      await api.triggerDevinRemediation(undefined, undefined, selectedRepo);
-      await loadSessions();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to trigger remediation");
-    } finally {
-      setDevinTriggering(false);
+  // Reset to setup view
+  const resetBenchmark = () => {
+    setBenchmarkRunning(false);
+    setSetupCollapsed(false);
+    setRunId(null);
+    setLiveRun(null);
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
     }
   };
-
-  const refreshDevin = async () => {
-    setDevinRefreshing(true);
-    try {
-      await api.refreshDevinSessions(selectedRepo);
-      await loadSessions();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to refresh sessions");
-    } finally {
-      setDevinRefreshing(false);
-    }
-  };
-
-  const runningSessions = sessions.filter((s) => s.status === "running");
-  const completedSessions = sessions.filter((s) => s.status === "completed");
-  const failedSessions = sessions.filter((s) => s.status === "failed" || s.status === "stopped");
 
   if (!selectedRepo) {
     return (
@@ -198,11 +576,31 @@ export default function RemediationPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Remediation</h1>
-        <p className="text-muted-foreground mt-1">
-          Fix CodeQL alerts using AI tools. Select alerts, choose a tool, and run remediation.
-        </p>
+      {/* Page Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Remediation Benchmark</h1>
+          <p className="text-muted-foreground mt-1">
+            {setupCollapsed
+              ? `Running ${filteredAlertCount} alerts across 5 tools`
+              : "Select alert severities and run all remediation tools simultaneously."}
+          </p>
+        </div>
+        {setupCollapsed && (
+          <div className="flex items-center gap-2">
+            {benchmarkRunning && (
+              <Badge className="bg-red-500 text-white animate-pulse">LIVE</Badge>
+            )}
+            <Button variant="outline" size="sm" onClick={() => setSetupCollapsed(false)}>
+              Show Setup
+            </Button>
+            {!benchmarkRunning && (
+              <Button variant="outline" size="sm" onClick={resetBenchmark}>
+                New Benchmark
+              </Button>
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
@@ -213,34 +611,17 @@ export default function RemediationPage() {
         </Card>
       )}
 
-      <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
-          <TabsTrigger value="api">API Tools (Anthropic / OpenAI / Google)</TabsTrigger>
-          <TabsTrigger value="devin">Devin</TabsTrigger>
-        </TabsList>
-
-        {/* ==================== API TOOLS TAB ==================== */}
-        <TabsContent value="api" className="space-y-6 mt-4">
-          {/* Alert Selection */}
+      {/* Setup Section (collapsible) */}
+      {!setupCollapsed && (
+        <div className="space-y-6">
+          {/* Severity Selection */}
           <Card>
             <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle>Select Alerts to Remediate</CardTitle>
-                  <CardDescription>
-                    {baselineAlerts.length} open baseline alerts &middot;{" "}
-                    {selectedAlerts.size} selected
-                  </CardDescription>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Button variant="outline" size="sm" onClick={toggleAll}>
-                    {selectedAlerts.size === baselineAlerts.length ? "Deselect All" : "Select All"}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={loadBaselineAlerts} disabled={alertsLoading}>
-                    {alertsLoading ? "Loading..." : "Refresh"}
-                  </Button>
-                </div>
-              </div>
+              <CardTitle>Alert Severity Filter</CardTitle>
+              <CardDescription>
+                {baselineAlerts.length} open baseline alerts &middot; {filteredAlertCount} selected
+                &middot; {filteredFiles.size} unique files
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {alertsLoading && baselineAlerts.length === 0 ? (
@@ -250,72 +631,94 @@ export default function RemediationPage() {
                   No open baseline alerts found. Run a scan first.
                 </p>
               ) : (
-                <div className="divide-y divide-border max-h-[400px] overflow-y-auto">
-                  {baselineAlerts.map((alert) => (
-                    <label
-                      key={alert.number}
-                      className="flex items-start gap-3 py-2.5 px-2 -mx-2 rounded-md hover:bg-muted/50 cursor-pointer transition-colors"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={selectedAlerts.has(alert.number)}
-                        onChange={() => toggleAlert(alert.number)}
-                        className="mt-1 h-4 w-4 rounded border-border"
-                      />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="font-medium text-sm tabular-nums">#{alert.number}</span>
-                          <Badge variant={getSeverityVariant(alert.severity)}>
-                            {alert.severity}
-                          </Badge>
+                <div className="grid gap-3 md:grid-cols-4">
+                  {SEVERITY_CONFIG.map((sev) => {
+                    const count = severityCounts[sev.key] || 0;
+                    const isSelected = selectedSeverities.has(sev.key);
+
+                    return (
+                      <label
+                        key={sev.key}
+                        className={`flex items-center gap-3 p-4 rounded-lg border-2 cursor-pointer transition-all ${
+                          isSelected
+                            ? `${sev.borderColor} bg-muted/50`
+                            : "border-border hover:border-muted-foreground/30"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSeverity(sev.key)}
+                          className="h-4 w-4 rounded"
+                        />
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`h-2.5 w-2.5 rounded-full ${sev.color}`} />
+                            <span className="font-medium text-sm">{sev.label}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {count} alert{count !== 1 ? "s" : ""}
+                          </p>
                         </div>
-                        <p className="text-sm truncate">{alert.rule_description || alert.rule_id}</p>
-                        <p className="text-xs text-muted-foreground truncate">
-                          {alert.file_path}:{alert.start_line}
-                        </p>
-                      </div>
-                    </label>
-                  ))}
+                      </label>
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Tool Action Buttons */}
+          {/* Cost Estimates Summary */}
           <Card>
             <CardHeader>
-              <CardTitle>Run Remediation</CardTitle>
+              <CardTitle>Estimated Remediation Cost</CardTitle>
               <CardDescription>
-                Choose a tool to fix the {selectedAlerts.size} selected alert{selectedAlerts.size !== 1 ? "s" : ""}.
-                Each alert will be processed sequentially — the LLM generates a fix and commits it to the tool&apos;s branch.
+                Cost estimates for {filteredAlertCount} alerts across all 5 tools
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="grid gap-4 md:grid-cols-3">
-                {API_TOOLS.map((tool) => {
-                  const cost = costEstimates?.[tool.key];
-                  const isRunning = remediating === tool.key;
-
+              <div className="grid gap-3 md:grid-cols-5">
+                {["devin", "copilot", "anthropic", "openai", "gemini"].map((tool) => {
+                  const estimate = costEstimates?.[tool];
                   return (
-                    <div key={tool.key} className="relative border rounded-lg p-4 space-y-3">
-                      <div className={`absolute top-0 left-0 right-0 h-1 rounded-t-lg ${tool.color}`} />
-                      <div>
-                        <p className="font-semibold">{tool.label}</p>
-                        <p className="text-xs text-muted-foreground">{tool.model}</p>
-                      </div>
-                      {cost && (
-                        <p className="text-xs text-muted-foreground">
-                          Est. cost: ${cost.total_cost_usd.toFixed(4)} &middot;{" "}
-                          {cost.estimated_input_tokens.toLocaleString()} tokens
+                    <div
+                      key={tool}
+                      className={`border rounded-lg p-3 border-l-4 ${TOOL_BORDER_COLORS[tool] || "border-gray-500"}`}
+                    >
+                      <p className={`font-medium text-sm ${TOOL_TEXT_COLORS[tool] || ""}`}>
+                        {TOOL_LABELS[tool] || tool}
+                      </p>
+                      {estimate ? (
+                        <div className="mt-1.5 space-y-0.5">
+                          <p className="text-lg font-bold font-mono">
+                            ${estimate.total_cost_usd.toFixed(4)}
+                          </p>
+                          {estimate.pricing_type === "acu" && (
+                            <p className="text-[10px] text-muted-foreground">
+                              {estimate.estimated_acus.toFixed(2)} ACU @ ${estimate.cost_per_acu_usd}/ACU
+                            </p>
+                          )}
+                          {estimate.pricing_type === "per_request" && (
+                            <p className="text-[10px] text-muted-foreground">
+                              {estimate.alerts_processed} alerts @ ${estimate.cost_per_request_usd}/req
+                            </p>
+                          )}
+                          {estimate.pricing_type === "token" && (
+                            <p className="text-[10px] text-muted-foreground">
+                              ~{estimate.estimated_input_tokens.toLocaleString()} input tokens
+                            </p>
+                          )}
+                          {estimate.assumption && (
+                            <p className="text-[10px] text-muted-foreground italic">
+                              {estimate.assumption}
+                            </p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="text-xs text-muted-foreground mt-1">
+                          No estimate available
                         </p>
                       )}
-                      <Button
-                        className="w-full"
-                        onClick={() => triggerApiRemediation(tool.key)}
-                        disabled={selectedAlerts.size === 0 || remediating !== null}
-                      >
-                        {isRunning ? "Remediating..." : `Remediate with ${tool.label}`}
-                      </Button>
                     </div>
                   );
                 })}
@@ -323,199 +726,34 @@ export default function RemediationPage() {
             </CardContent>
           </Card>
 
-          {/* Last Result */}
-          {lastResult && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Remediation Result</CardTitle>
-                <CardDescription>{lastResult.message}</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-3 gap-4 mb-4">
-                  <div>
-                    <p className="text-2xl font-bold text-emerald-500">{lastResult.completed}</p>
-                    <p className="text-xs text-muted-foreground">Completed</p>
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-destructive">{lastResult.failed}</p>
-                    <p className="text-xs text-muted-foreground">Failed</p>
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-muted-foreground">{lastResult.skipped}</p>
-                    <p className="text-xs text-muted-foreground">Skipped</p>
-                  </div>
-                </div>
-                {lastResult.jobs.length > 0 && (
-                  <div className="divide-y divide-border">
-                    {lastResult.jobs.map((job) => (
-                      <div key={job.id} className="flex items-start gap-3 py-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-0.5">
-                            <span className="font-medium text-sm">Alert #{job.alert_number}</span>
-                            <Badge variant={STATUS_VARIANTS[job.status] || "outline"}>
-                              {job.status}
-                            </Badge>
-                          </div>
-                          <p className="text-xs text-muted-foreground truncate">{job.file_path}</p>
-                          {job.error_message && (
-                            <p className="text-xs text-destructive mt-0.5 truncate">{job.error_message}</p>
-                          )}
-                        </div>
-                        {job.commit_sha && (
-                          <span className="text-xs text-muted-foreground font-mono">
-                            {job.commit_sha.slice(0, 8)}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Job History */}
-          {apiJobs.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Job History</CardTitle>
-                <CardDescription>{apiJobs.length} total API remediation jobs</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="divide-y divide-border max-h-[300px] overflow-y-auto">
-                  {apiJobs.map((job) => (
-                    <div key={job.id} className="flex items-start gap-3 py-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="font-medium text-sm">Alert #{job.alert_number}</span>
-                          <Badge variant="outline">{job.tool}</Badge>
-                          <Badge variant={STATUS_VARIANTS[job.status] || "outline"}>
-                            {job.status}
-                          </Badge>
-                        </div>
-                        <p className="text-xs text-muted-foreground truncate">{job.file_path}</p>
-                        {job.error_message && (
-                          <p className="text-xs text-destructive mt-0.5 truncate">{job.error_message}</p>
-                        )}
-                      </div>
-                      <div className="text-right shrink-0">
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(job.created_at).toLocaleDateString()}
-                        </p>
-                        {job.commit_sha && (
-                          <span className="text-xs text-muted-foreground font-mono">
-                            {job.commit_sha.slice(0, 8)}
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </CardContent>
-            </Card>
-          )}
-        </TabsContent>
-
-        {/* ==================== DEVIN TAB ==================== */}
-        <TabsContent value="devin" className="space-y-6 mt-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Devin Remediation</h2>
-              <p className="text-sm text-muted-foreground">
-                Manage automated Devin sessions for fixing CodeQL alerts
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <Button onClick={triggerDevin} disabled={devinTriggering}>
-                {devinTriggering ? "Creating Sessions..." : "Launch Remediation"}
-              </Button>
-              <Button variant="outline" onClick={refreshDevin} disabled={devinRefreshing}>
-                {devinRefreshing ? "Refreshing..." : "Refresh Status"}
-              </Button>
-            </div>
+          {/* Run Benchmark Button */}
+          <div className="flex items-center justify-center">
+            <Button
+              size="lg"
+              className="px-12 py-6 text-lg"
+              onClick={runBenchmark}
+              disabled={filteredAlertCount === 0 || benchmarkRunning || alertsLoading}
+            >
+              {benchmarkRunning
+                ? "Benchmark Running..."
+                : `Run Benchmark (${filteredAlertCount} alerts \u00d7 5 tools)`}
+            </Button>
           </div>
+        </div>
+      )}
 
-          {/* Summary Stats */}
-          <div className="grid gap-4 md:grid-cols-3">
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Running</CardDescription>
-                <CardTitle className="text-3xl">{runningSessions.length}</CardTitle>
-              </CardHeader>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Completed</CardDescription>
-                <CardTitle className="text-3xl text-emerald-500">{completedSessions.length}</CardTitle>
-              </CardHeader>
-            </Card>
-            <Card>
-              <CardHeader className="pb-2">
-                <CardDescription>Failed / Stopped</CardDescription>
-                <CardTitle className="text-3xl text-destructive">{failedSessions.length}</CardTitle>
-              </CardHeader>
-            </Card>
-          </div>
+      {/* Live Replay View */}
+      {liveRun && (
+        <LiveReplayView run={liveRun} isLive={benchmarkRunning} />
+      )}
 
-          {/* Session List */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Session History</CardTitle>
-              <CardDescription>
-                {sessions.length} total sessions
-                {devinLoading && " · Loading..."}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {sessions.length === 0 ? (
-                <p className="text-center text-muted-foreground py-8">
-                  No remediation sessions yet. Click &ldquo;Launch Remediation&rdquo; to start fixing alerts with Devin.
-                </p>
-              ) : (
-                <div className="divide-y divide-border">
-                  {sessions.map((session) => (
-                    <div key={session.id} className="flex items-start gap-4 py-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-medium text-sm">Alert #{session.alert_number}</span>
-                          <Badge variant={STATUS_VARIANTS[session.status] || "outline"}>
-                            {session.status}
-                          </Badge>
-                        </div>
-                        <p className="text-sm text-muted-foreground truncate">{session.rule_id}</p>
-                        <p className="text-xs text-muted-foreground truncate">{session.file_path}</p>
-                        {session.pr_url && (
-                          <a
-                            href={session.pr_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-primary hover:underline mt-1 inline-block"
-                          >
-                            View PR
-                          </a>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <p className="text-xs text-muted-foreground">
-                          {new Date(session.created_at).toLocaleDateString()}
-                        </p>
-                        <a
-                          href={`https://app.devin.ai/sessions/${session.session_id}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-primary hover:underline"
-                        >
-                          Devin Session
-                        </a>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+      {/* Loading state before first poll returns */}
+      {runId != null && !liveRun && (
+        <div className="flex flex-col items-center justify-center py-16 space-y-4">
+          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+          <p className="text-muted-foreground">Starting benchmark...</p>
+        </div>
+      )}
     </div>
   );
 }

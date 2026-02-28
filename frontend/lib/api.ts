@@ -156,6 +156,15 @@ export interface ReportHistoryItem {
   created_at: string;
 }
 
+// Benchmark types
+export interface BenchmarkResponse {
+  run_id: number;
+  alert_count: number;
+  severity_counts: Record<string, number>;
+  tools: string[];
+  message: string;
+}
+
 // Replay types
 export interface ReplayEvent {
   id: number;
@@ -313,6 +322,13 @@ export const api = {
   listReports: (reportType?: string, repo?: string | null) => {
     return fetchApi<ReportHistoryItem[]>(`/api/reports/history${qs({ report_type: reportType, repo })}`);
   },
+
+  // Benchmark
+  triggerBenchmark: (severities: string[], repo?: string | null) =>
+    fetchApi<BenchmarkResponse>(`/api/remediate/benchmark${qs({ repo })}`, {
+      method: "POST",
+      body: JSON.stringify({ severities }),
+    }),
 
   // Replay
   listReplayRuns: (repo?: string | null) =>

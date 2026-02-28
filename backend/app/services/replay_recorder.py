@@ -87,6 +87,24 @@ class ReplayRecorder:
         self._start_time: float = 0.0
         self._cumulative_cost: float = 0.0
 
+    @classmethod
+    async def attach(
+        cls,
+        run_id: int,
+        tools: list[str] | None = None,
+        repo: str = "",
+    ) -> "ReplayRecorder":
+        """Attach to an existing replay run (e.g. for benchmark with shared run).
+
+        Unlike ``start()``, this does NOT create a new DB row — it simply
+        sets the recorder to write events against the given ``run_id``.
+        """
+        recorder = cls(tools=tools or [], repo=repo)
+        recorder.run_id = run_id
+        recorder._start_time = time.monotonic()
+        recorder._cumulative_cost = 0.0
+        return recorder
+
     async def start(self) -> int:
         """Create a replay run and start the clock. Returns the run_id."""
         now = datetime.now(timezone.utc).isoformat()
