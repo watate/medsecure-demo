@@ -13,6 +13,7 @@ import { useRepo } from "@/lib/repo-context";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 
 // ---------------------------------------------------------------------------
 // Constants (mirrored from replay page for consistency)
@@ -1024,11 +1025,75 @@ export default function RemediationPage() {
         <LiveReplayView run={liveRun} isLive={benchmarkRunning} />
       )}
 
-      {/* Loading state before first poll returns */}
-      {runId != null && !liveRun && (
-        <div className="flex flex-col items-center justify-center py-16 space-y-4">
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          <p className="text-muted-foreground">Starting benchmark...</p>
+      {/* Skeleton loading while benchmark initialises (branch creation, etc.) */}
+      {benchmarkRunning && !liveRun && (
+        <div className="space-y-6">
+          {/* Status bar skeleton */}
+          <Card>
+            <CardContent className="pt-6">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <Skeleton className="h-3 w-3 rounded-full" />
+                  <Skeleton className="h-4 w-48" />
+                </div>
+                <Skeleton className="h-4 w-24" />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Remediation Timeline skeleton */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-5 w-44" />
+              </div>
+              <Skeleton className="h-3 w-64 mt-1" />
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div key={i} className="flex items-center gap-3">
+                    <Skeleton className="h-4 w-20" />
+                    <div className="flex-1 flex items-center gap-1">
+                      {Array.from({ length: 8 }).map((_, j) => (
+                        <Skeleton key={j} className="h-5 w-5 rounded" />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <Skeleton className="h-3 w-full mt-4" />
+            </CardContent>
+          </Card>
+
+          {/* Event Log skeleton */}
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Skeleton className="h-5 w-24" />
+              </div>
+              <Skeleton className="h-3 w-40 mt-1" />
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {[1, 2, 3, 4].map((i) => (
+                  <div key={i} className="flex items-start gap-3">
+                    <Skeleton className="h-3 w-16" />
+                    <Skeleton className="h-5 w-5 rounded" />
+                    <div className="flex-1 space-y-1">
+                      <Skeleton className="h-3 w-full" />
+                      <Skeleton className="h-3 w-3/4" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Subtle status text */}
+          <p className="text-center text-sm text-muted-foreground animate-pulse">
+            Setting up benchmark &mdash; creating branches and preparing tools&hellip;
+          </p>
         </div>
       )}
     </div>
