@@ -14,7 +14,7 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ap-southeast-1
+        awslogs-region: us-east-1
         awslogs-group: /medsecure/prod/caddy
         tag: caddy/{{ .Name }}
         awslogs-create-group: "true"
@@ -29,7 +29,7 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ap-southeast-1
+        awslogs-region: us-east-1
         awslogs-group: /medsecure/prod/web
         tag: web/{{ .Name }}
         awslogs-create-group: "true"
@@ -46,7 +46,7 @@ services:
     logging:
       driver: awslogs
       options:
-        awslogs-region: ap-southeast-1
+        awslogs-region: us-east-1
         awslogs-group: /medsecure/prod/api
         tag: api/{{ .Name }}
         awslogs-create-group: "true"

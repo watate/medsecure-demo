@@ -21,6 +21,8 @@ from app.models.schemas import (
     DevinSession,
     RemediationRequest,
     RemediationResponse,
+    SpotBugsResultsResponse,
+    SpotBugsToolResult,
 )
 from app.services.database import get_db
 from app.services.devin_client import DevinClient
@@ -32,7 +34,11 @@ from app.services.replay_recorder import (
     compute_devin_session_cost,
     compute_llm_call_cost,
 )
-from app.services.repo_resolver import resolve_baseline_branch, resolve_repo
+from app.services.repo_resolver import (
+    get_latest_tool_branches,
+    resolve_baseline_branch,
+    resolve_repo,
+)
 from app.services.token_counter import (
     build_grouped_prompt_for_file,
     build_prompt_for_alert,
@@ -1431,18 +1437,19 @@ async def _benchmark_devin(
     branch_name: str | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> None:
-    """Background task: run Devin remediation using a **single session**.
+    """Background task: run Devin remediation with **one session per file group**.
 
-    To avoid rate limits, only ONE Devin session is created.  Each file
-    group's alerts are sent as follow-up messages to the same session once
-    Devin reaches ``waiting_for_user`` (i.e. finished the previous task).
+    Each file group (alerts sharing the same filepath) gets its own Devin
+    session.  When a session finishes (reaches ``waiting_for_user`` or a
+    terminal state), it is archived and the next file group gets a fresh
+    session.  This avoids 403 errors from messaging finished sessions.
 
-    Flow:
-    1. Create a single session with the first file group
+    Flow per file group:
+    1. Create a new Devin session
     2. Poll until ``waiting_for_user`` or a hard terminal state
-    3. Detect new commits, record events
-    4. Send the next file group as a message to the same session
-    5. Repeat 2-4 until all file groups are done
+    3. Archive the session
+    4. Detect new commits, record events
+    5. Repeat for the next file group
     """
     if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
@@ -1479,7 +1486,7 @@ async def _benchmark_devin(
         detail=(
             f"Starting Devin remediation for {len(alerts)} alerts "
             f"across {len(file_groups)} files on {branch_name} "
-            f"(single session — alerts sent as follow-up messages)"
+            f"(one session per file group)"
         ),
         metadata={
             "repo": resolved_repo,
@@ -1492,8 +1499,7 @@ async def _benchmark_devin(
     db = await get_db()
     total_commits = 0
     failed = 0
-    session_id = ""
-    session_url = ""
+    total_sessions = 0
     # Track per-file-group info for the UI
     all_sessions: list[dict] = []  # {session_id, file_path, status, url}
 
@@ -1504,7 +1510,7 @@ async def _benchmark_devin(
         file_group_items = list(file_groups.items())
 
         for idx, (file_path, file_alerts) in enumerate(file_group_items):
-            # Check for cancellation before each task
+            # Check for cancellation before each file group
             if cancel_event and cancel_event.is_set():
                 await recorder.record(
                     tool="devin",
@@ -1514,92 +1520,49 @@ async def _benchmark_devin(
                 )
                 break
 
-            # -- Step 1: Create session (first group) or send message (subsequent) --
-            # Guard: if session creation failed at idx=0, can't send messages
-            if idx > 0 and not session_id:
-                logger.warning(
-                    "Benchmark %d: no session_id — skipping remaining %d group(s)",
-                    run_id, len(file_group_items) - idx,
-                )
-                failed += sum(len(fa) for _, fa in file_group_items[idx:])
-                break
+            # -- Step 1: Create a new session for this file group --
+            session_id = ""
+            session_url = ""
 
             try:
-                if idx == 0:
-                    # Create the single session with the first file group
-                    await recorder.record(
-                        tool="devin",
-                        event_type="session_created",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Creating Devin session "
-                            f"for {len(file_alerts)} alert(s) in {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "file_path": file_path,
-                            "alert_count": len(file_alerts),
-                            "alert_numbers": [a.number for a in file_alerts],
-                            "branch": branch_name,
-                            "group_index": idx + 1,
-                            "total_groups": len(file_group_items),
-                        },
+                await recorder.record(
+                    tool="devin",
+                    event_type="session_created",
+                    detail=(
+                        f"[{idx + 1}/{len(file_group_items)}] Creating Devin session "
+                        f"for {len(file_alerts)} alert(s) in {file_path}"
+                    ),
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "file_path": file_path,
+                        "alert_count": len(file_alerts),
+                        "alert_numbers": [a.number for a in file_alerts],
+                        "branch": branch_name,
+                        "group_index": idx + 1,
+                        "total_groups": len(file_group_items),
+                    },
+                )
+
+                if len(file_alerts) == 1:
+                    result = await devin.create_remediation_session(
+                        file_alerts[0], resolved_repo, branch_name,
                     )
-
-                    if len(file_alerts) == 1:
-                        result = await devin.create_remediation_session(
-                            file_alerts[0], resolved_repo, branch_name,
-                        )
-                    else:
-                        result = await devin.create_grouped_session(
-                            file_alerts, resolved_repo, branch_name,
-                        )
-                    session_id = result.get("session_id", "")
-                    session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
-
-                    for alert in file_alerts:
-                        await db.execute(
-                            """INSERT INTO devin_sessions
-                               (repo, session_id, alert_number, rule_id, file_path, status)
-                               VALUES (?, ?, ?, ?, ?, 'running')""",
-                            (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
-                        )
-                    await db.commit()
-
                 else:
-                    # Send the next file group as a follow-up message
-                    followup = devin.build_followup_message(
+                    result = await devin.create_grouped_session(
                         file_alerts, resolved_repo, branch_name,
                     )
-                    await devin.send_message(session_id, followup)
+                session_id = result.get("session_id", "")
+                session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
+                total_sessions += 1
 
-                    # Record DB rows for the new alert group (same session)
-                    for alert in file_alerts:
-                        await db.execute(
-                            """INSERT OR IGNORE INTO devin_sessions
-                               (repo, session_id, alert_number, rule_id, file_path, status)
-                               VALUES (?, ?, ?, ?, ?, 'running')""",
-                            (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
-                        )
-                    await db.commit()
-
-                    await recorder.record(
-                        tool="devin",
-                        event_type="message_sent",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Sent follow-up message "
-                            f"for {len(file_alerts)} alert(s) in {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "session_id": session_id,
-                            "session_url": session_url,
-                            "file_path": file_path,
-                            "alert_count": len(file_alerts),
-                            "alert_numbers": [a.number for a in file_alerts],
-                            "group_index": idx + 1,
-                            "total_groups": len(file_group_items),
-                        },
+                for alert in file_alerts:
+                    await db.execute(
+                        """INSERT INTO devin_sessions
+                           (repo, session_id, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, ?, 'running')""",
+                        (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
                     )
+                await db.commit()
 
                 # Track this file group in the UI list
                 all_sessions.append({
@@ -1609,29 +1572,28 @@ async def _benchmark_devin(
                     "url": session_url,
                 })
 
-                if idx == 0:
-                    await recorder.record(
-                        tool="devin",
-                        event_type="analyzing",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Devin session started "
-                            f"for {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "session_id": session_id,
-                            "session_url": session_url,
-                            "file_path": file_path,
-                            "branch": branch_name,
-                        },
-                    )
+                await recorder.record(
+                    tool="devin",
+                    event_type="analyzing",
+                    detail=(
+                        f"[{idx + 1}/{len(file_group_items)}] Devin session {session_id} "
+                        f"started for {file_path}"
+                    ),
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "session_id": session_id,
+                        "session_url": session_url,
+                        "file_path": file_path,
+                        "branch": branch_name,
+                    },
+                )
 
             except Exception as e:
-                logger.exception("Benchmark devin: failed to create/message session for %s", file_path)
+                logger.exception("Benchmark devin: failed to create session for %s", file_path)
                 await recorder.record(
                     tool="devin",
                     event_type="error",
-                    detail=f"Failed to create/message session for {file_path}: {str(e)[:200]}",
+                    detail=f"Failed to create session for {file_path}: {str(e)[:200]}",
                     alert_number=file_alerts[0].number,
                     metadata={"error": str(e)[:500], "file_path": file_path},
                 )
@@ -1646,13 +1608,13 @@ async def _benchmark_devin(
             while not task_done:
                 if cancel_event and cancel_event.is_set():
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = "cancelled"
                     await db.execute(
                         """UPDATE devin_sessions
                            SET status = 'cancelled', updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
                     )
                     await db.commit()
                     await recorder.record(
@@ -1670,13 +1632,13 @@ async def _benchmark_devin(
                         run_id, session_id, elapsed, file_path,
                     )
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = "timeout"
                     await db.execute(
                         """UPDATE devin_sessions
                            SET status = 'timeout', updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
                     )
                     await db.commit()
                     await recorder.record(
@@ -1715,7 +1677,7 @@ async def _benchmark_devin(
                     if status in DEVIN_TERMINAL_STATES:
                         task_done = True
                         effective_status = status
-                    # waiting_for_user — Devin finished this task, ready for next
+                    # waiting_for_user — Devin finished this task
                     elif status_detail in DEVIN_TERMINAL_STATUS_DETAILS:
                         task_done = True
                         effective_status = f"{status}:{status_detail}"
@@ -1728,7 +1690,7 @@ async def _benchmark_devin(
 
                     # Update tracker for this file group
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = effective_status
                             s["url"] = session_url
 
@@ -1759,8 +1721,8 @@ async def _benchmark_devin(
                            SET status = ?, pr_url = ?,
                                acus = COALESCE(?, acus),
                                updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (effective_status, pr_url, acus, resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (effective_status, pr_url, acus, resolved_repo, session_id),
                     )
                     await db.commit()
 
@@ -1774,17 +1736,28 @@ async def _benchmark_devin(
                         session_id, e,
                     )
 
-            # -- Step 3: Detect new commits from this task --
-            # Run BEFORE the hard-terminal break so that commits from
-            # the current file group (including on "exit") are recorded.
+            # -- Step 3: Archive the session --
+            if session_id:
+                try:
+                    await devin.archive_session(session_id)
+                    logger.info(
+                        "Benchmark %d: archived Devin session %s for %s",
+                        run_id, session_id, file_path,
+                    )
+                except Exception as e:
+                    # Non-fatal — session may already be archived or in a terminal state
+                    logger.warning(
+                        "Benchmark devin: failed to archive session %s: %s",
+                        session_id, e,
+                    )
+
+            # -- Step 4: Detect new commits from this file group --
             try:
                 new_commits = await github.list_commits(
                     branch_name, since_sha=last_known_sha,
                 )
 
                 if new_commits:
-                    # Record one patch_applied per alert in this group
-                    # (so 3 alerts = 3 fixes, not 1)
                     for alert in file_alerts:
                         await recorder.record(
                             tool="devin",
@@ -1821,35 +1794,23 @@ async def _benchmark_devin(
                     metadata={"error": str(e)[:500], "session_id": session_id},
                 )
 
-            # If cancelled or hard terminal, stop processing further groups
+            # If cancelled, stop processing further groups
             if cancel_event and cancel_event.is_set():
-                break
-            if session_id and effective_status in ("error", "suspended", "exit", "unknown"):
-                # Session ended for real or timed out — can't send more messages
-                logger.warning(
-                    "Benchmark %d: Devin session %s reached terminal/timeout (%s), "
-                    "stopping at group %d/%d",
-                    run_id, session_id, effective_status, idx + 1, len(file_group_items),
-                )
-                failed += sum(
-                    len(fa) for _, fa in file_group_items[idx + 1:]
-                )
                 break
 
         await recorder.record(
             tool="devin",
             event_type="remediation_complete",
             detail=(
-                f"Devin complete: 1 session, "
+                f"Devin complete: {total_sessions} session(s), "
                 f"{total_commits} commit(s), {failed} failed "
                 f"out of {len(alerts)} alerts"
             ),
             metadata={
-                "session_id": session_id,
-                "session_url": session_url,
                 "commits": total_commits,
                 "failed": failed,
                 "total_alerts": len(alerts),
+                "total_sessions": total_sessions,
                 "file_count": len(file_groups),
                 "branch": branch_name,
                 "sessions": all_sessions,
@@ -2303,22 +2264,22 @@ async def cancel_benchmark(
     run_id: int,
     repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> dict[str, str | int]:
-    """Cancel a running benchmark by setting its cancel event."""
+    """Cancel a running benchmark by setting its cancel event.
+
+    If the in-memory cancel event is not found (e.g. after server restart),
+    the DB status is still updated to 'cancelled' so the frontend reflects
+    the cancellation.
+    """
     cancel_event = _cancel_events.get(run_id)
-    if not cancel_event:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No active benchmark found for run_id={run_id}",
-        )
+    if cancel_event:
+        cancel_event.set()
 
-    cancel_event.set()
-
-    # Update run status immediately
+    # Update run status immediately regardless of whether we found an in-memory event
     db = await get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "UPDATE replay_runs SET status = 'cancelled', ended_at = ? WHERE id = ?",
+            "UPDATE replay_runs SET status = 'cancelled', ended_at = ? WHERE id = ? AND status = 'running'",
             (now, run_id),
         )
         await db.commit()
@@ -2326,3 +2287,221 @@ async def cancel_benchmark(
         await db.close()
 
     return {"status": "cancelled", "run_id": run_id}
+
+
+# ------------------------------------------------------------------
+# SpotBugs results via GitHub Actions artifacts
+# ------------------------------------------------------------------
+
+SPOTBUGS_WORKFLOW_NAME = "SpotBugs Analysis"
+
+# Stagger between GitHub API calls to avoid secondary rate limits
+_GH_ACTIONS_STAGGER_S = 1.0
+
+
+def _count_bugs_in_xml(xml_content: str) -> int:
+    """Count <BugInstance> elements in SpotBugs XML output."""
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(xml_content)
+        return len(root.findall(".//BugInstance"))
+    except ET.ParseError:
+        logger.warning("Failed to parse SpotBugs XML; falling back to regex count")
+        import re
+
+        return len(re.findall(r"<BugInstance", xml_content))
+
+
+@router.get("/spotbugs-results", response_model=SpotBugsResultsResponse)
+async def get_spotbugs_results(
+    repo: str | None = Query(default=None, description="Repository (owner/repo)"),
+    run_id: int | None = Query(default=None, description="Benchmark run_id to resolve branches from"),
+) -> SpotBugsResultsResponse:
+    """Fetch SpotBugs CI results for each tool's remediation branch.
+
+    For each tool branch we:
+    1. Find the latest "SpotBugs Analysis" workflow run via GitHub Actions API.
+    2. If the run is complete and successful, download the artifact zip and
+       extract the SpotBugs XML report.
+    3. Parse bug counts from the XML and return everything to the frontend.
+
+    If *run_id* is provided, branches are resolved from that benchmark's
+    replay_runs entry.  Otherwise we use ``get_latest_tool_branches``.
+    """
+    resolved_repo = await resolve_repo(repo)
+
+    # Resolve tool → branch mapping
+    if run_id is not None:
+        db = await get_db()
+        try:
+            cursor = await db.execute(
+                "SELECT tools, branch_name FROM replay_runs WHERE id = ?",
+                (run_id,),
+            )
+            row = await cursor.fetchone()
+        finally:
+            await db.close()
+
+        if not row:
+            raise HTTPException(status_code=404, detail=f"No replay run found for run_id={run_id}")
+
+        import json as _json
+
+        try:
+            tools_list: list[str] = _json.loads(row["tools"] or "[]")
+        except Exception:
+            tools_list = []
+
+        # Benchmark runs store a single branch_name for all tools, but each
+        # tool has its own branch of the form remediate/{tool}-bench-{ts}.
+        # We need to look up the branch_name pattern.  The benchmark creates
+        # branches like "remediate/{tool}-bench-{ts}" so we can re-derive them
+        # from the run's branch pattern.
+        branch_name: str | None = row["branch_name"]
+        tool_branches: dict[str, str] = {}
+
+        if branch_name:
+            # Old single-branch runs — all tools share a branch
+            for tool in tools_list:
+                if tool == "baseline":
+                    continue
+                tool_branches[tool] = branch_name
+        else:
+            # Benchmark runs: look up actual per-tool branches from replay_events
+            db2 = await get_db()
+            try:
+                cursor2 = await db2.execute(
+                    "SELECT tool, detail, metadata FROM replay_events "
+                    "WHERE run_id = ? AND event_type IN ('scan_started', 'codeql_ready') "
+                    "ORDER BY id ASC",
+                    (run_id,),
+                )
+                rows2 = await cursor2.fetchall()
+                for r in rows2:
+                    tool_name = r["tool"]
+                    if tool_name == "baseline" or tool_name == "benchmark":
+                        continue
+                    try:
+                        meta = _json.loads(r["metadata"] or "{}")
+                    except Exception:
+                        meta = {}
+                    branch_val = meta.get("branch", "")
+                    if branch_val and tool_name not in tool_branches:
+                        tool_branches[tool_name] = branch_val
+            finally:
+                await db2.close()
+
+        if not tool_branches:
+            # Fallback to latest known branches
+            tool_branches = await get_latest_tool_branches(resolved_repo)
+    else:
+        tool_branches = await get_latest_tool_branches(resolved_repo)
+
+    if not tool_branches:
+        return SpotBugsResultsResponse(
+            repo=resolved_repo,
+            results=[],
+            message="No tool branches found. Run a benchmark first.",
+        )
+
+    # For each tool branch, check GitHub Actions for the SpotBugs workflow
+    github = GitHubClient(repo=resolved_repo)
+    results: list[SpotBugsToolResult] = []
+
+    for i, (tool_name, branch) in enumerate(sorted(tool_branches.items())):
+        if i > 0:
+            await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+
+        try:
+            runs = await github.get_workflow_runs_for_branch(
+                branch, workflow_name=SPOTBUGS_WORKFLOW_NAME, per_page=5,
+            )
+
+            if not runs:
+                results.append(SpotBugsToolResult(
+                    tool=tool_name,
+                    branch=branch,
+                    workflow_status="not_found",
+                    error="No SpotBugs workflow run found for this branch",
+                ))
+                continue
+
+            run = runs[0]
+            status = run["status"]
+            conclusion = run.get("conclusion")
+
+            result = SpotBugsToolResult(
+                tool=tool_name,
+                branch=branch,
+                workflow_status=status,
+                workflow_conclusion=conclusion,
+                workflow_url=run.get("html_url"),
+            )
+
+            # If the run completed successfully, try to download the artifact
+            if status == "completed" and conclusion == "success":
+                await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+                artifacts = await github.get_run_artifacts(run["id"])
+
+                # Find the spotbugs report artifact
+                spotbugs_artifact = None
+                for artifact in artifacts:
+                    if "spotbugs" in artifact["name"].lower():
+                        spotbugs_artifact = artifact
+                        break
+
+                if spotbugs_artifact and not spotbugs_artifact.get("expired"):
+                    await asyncio.sleep(_GH_ACTIONS_STAGGER_S)
+                    files = await github.download_artifact_zip(spotbugs_artifact["id"])
+
+                    # Find the XML report file
+                    xml_content: str | None = None
+                    for fname, content in files.items():
+                        if fname.endswith(".xml"):
+                            xml_content = content
+                            break
+
+                    if xml_content:
+                        result.artifact_downloaded = True
+                        result.report_content = xml_content
+                        result.bug_count = _count_bugs_in_xml(xml_content)
+                    else:
+                        # No XML found — return raw file listing
+                        result.artifact_downloaded = True
+                        all_content = "\n\n".join(
+                            f"--- {fname} ---\n{content}"
+                            for fname, content in files.items()
+                        )
+                        result.report_content = all_content
+                elif spotbugs_artifact and spotbugs_artifact.get("expired"):
+                    result.error = "Artifact has expired"
+                else:
+                    result.error = "No SpotBugs artifact found in workflow run"
+
+            elif status == "completed" and conclusion == "failure":
+                result.error = "SpotBugs workflow failed"
+
+            results.append(result)
+
+        except Exception as e:
+            logger.exception("Failed to fetch SpotBugs results for %s/%s", tool_name, branch)
+            results.append(SpotBugsToolResult(
+                tool=tool_name,
+                branch=branch,
+                workflow_status="error",
+                error=str(e)[:500],
+            ))
+
+    # Summary message
+    completed = sum(1 for r in results if r.workflow_status == "completed")
+    running = sum(1 for r in results if r.workflow_status in ("queued", "in_progress"))
+    message = f"{completed}/{len(results)} completed"
+    if running > 0:
+        message += f", {running} still running"
+
+    return SpotBugsResultsResponse(
+        repo=resolved_repo,
+        results=results,
+        message=message,
+    )

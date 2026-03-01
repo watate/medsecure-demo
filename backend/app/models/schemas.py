@@ -283,6 +283,27 @@ class BenchmarkResponse(BaseModel):
     message: str
 
 
+# --- SpotBugs / GitHub Actions schemas ---
+
+
+class SpotBugsToolResult(BaseModel):
+    tool: str
+    branch: str
+    workflow_status: str  # queued, in_progress, completed, not_found
+    workflow_conclusion: str | None = None  # success, failure, cancelled, …
+    workflow_url: str | None = None
+    artifact_downloaded: bool = False
+    report_content: str | None = None  # raw SpotBugs XML/text content
+    bug_count: int | None = None
+    error: str | None = None
+
+
+class SpotBugsResultsResponse(BaseModel):
+    repo: str
+    results: list[SpotBugsToolResult]
+    message: str
+
+
 # --- Replay schemas ---
 
 

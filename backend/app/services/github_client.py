@@ -1,6 +1,8 @@
 import asyncio
+import io
 import logging
 import time
+import zipfile
 
 import httpx
 
@@ -464,3 +466,99 @@ class GitHubClient:
             response.raise_for_status()
             data = response.json()
             return data.get("commit", {}).get("sha", "")
+
+    # ------------------------------------------------------------------
+    # GitHub Actions helpers (workflow runs & artifacts)
+    # ------------------------------------------------------------------
+
+    async def get_workflow_runs_for_branch(
+        self,
+        branch: str,
+        *,
+        workflow_name: str | None = None,
+        per_page: int = 5,
+    ) -> list[dict]:
+        """Get the most recent workflow runs for a branch.
+
+        Optionally filters by *workflow_name* (the ``name:`` field in the
+        workflow YAML, matched case-insensitively).
+
+        Returns a list of run dicts with keys: id, name, status,
+        conclusion, html_url, created_at, updated_at, head_sha.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/actions/runs",
+                headers=self.headers,
+                params={
+                    "branch": branch,
+                    "per_page": per_page,
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        runs: list[dict] = []
+        for item in data.get("workflow_runs", []):
+            if workflow_name and item.get("name", "").lower() != workflow_name.lower():
+                continue
+            runs.append({
+                "id": item["id"],
+                "name": item.get("name", ""),
+                "status": item.get("status", ""),          # queued, in_progress, completed
+                "conclusion": item.get("conclusion"),       # success, failure, cancelled, …
+                "html_url": item.get("html_url", ""),
+                "created_at": item.get("created_at", ""),
+                "updated_at": item.get("updated_at", ""),
+                "head_sha": item.get("head_sha", ""),
+            })
+        return runs
+
+    async def get_run_artifacts(self, run_id: int) -> list[dict]:
+        """List artifacts produced by a workflow run.
+
+        Returns a list of dicts with keys: id, name, size_in_bytes,
+        archive_download_url, created_at, expired.
+        """
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/actions/runs/{run_id}/artifacts",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+        return [
+            {
+                "id": a["id"],
+                "name": a.get("name", ""),
+                "size_in_bytes": a.get("size_in_bytes", 0),
+                "archive_download_url": a.get("archive_download_url", ""),
+                "created_at": a.get("created_at", ""),
+                "expired": a.get("expired", False),
+            }
+            for a in data.get("artifacts", [])
+        ]
+
+    async def download_artifact_zip(self, artifact_id: int) -> dict[str, str]:
+        """Download an artifact zip and return its contents as {filename: text}.
+
+        Only text-decodable files are included; binary files are skipped.
+        """
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.get(
+                f"{self.BASE_URL}/repos/{self.repo}/actions/artifacts/{artifact_id}/zip",
+                headers=self.headers,
+            )
+            response.raise_for_status()
+
+        files: dict[str, str] = {}
+        with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+            for name in zf.namelist():
+                if name.endswith("/"):
+                    continue  # skip directories
+                try:
+                    files[name] = zf.read(name).decode("utf-8")
+                except UnicodeDecodeError:
+                    logger.debug("Skipping binary file in artifact: %s", name)
+        return files
