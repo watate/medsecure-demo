@@ -1602,8 +1602,9 @@ async def _benchmark_devin(
             # ── Step 2: Poll via get_session_status until done ───────
             poll_start = _time.monotonic()
             effective_status = "unknown"
+            session_done = False
 
-            while True:
+            while not session_done:
                 if cancel_event and cancel_event.is_set():
                     for s in all_sessions:
                         if s["session_id"] == session_id:
@@ -1621,6 +1622,7 @@ async def _benchmark_devin(
                         detail=f"Cancelled while polling session {session_id} for {file_path}",
                         metadata={"session_id": session_id, "file_path": file_path},
                     )
+                    session_done = True
                     break
 
                 elapsed = _time.monotonic() - poll_start
@@ -1654,6 +1656,7 @@ async def _benchmark_devin(
                         },
                     )
                     failed += len(file_alerts)
+                    session_done = True
                     break
 
                 await asyncio.sleep(DEVIN_POLL_INTERVAL)
@@ -1726,13 +1729,18 @@ async def _benchmark_devin(
                     if effective_status in ("error", "suspended"):
                         failed += len(file_alerts)
 
-                    break  # Session done — exit polling loop
+                    session_done = True  # Mark done before break
 
                 except Exception as e:
                     logger.warning(
                         "Benchmark devin: failed to poll session %s: %s",
                         session_id, e,
                     )
+
+                # Exit polling loop once session is done, even if
+                # DB/recorder operations above threw an exception.
+                if session_done:
+                    break
 
             # ── Step 3: Detect new commits from this file group ──────
             # (No archiving — sessions remain resumable)
