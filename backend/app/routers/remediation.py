@@ -1437,18 +1437,19 @@ async def _benchmark_devin(
     branch_name: str | None = None,
     cancel_event: asyncio.Event | None = None,
 ) -> None:
-    """Background task: run Devin remediation using a **single session**.
+    """Background task: run Devin remediation with **one session per file group**.
 
-    To avoid rate limits, only ONE Devin session is created.  Each file
-    group's alerts are sent as follow-up messages to the same session once
-    Devin reaches ``waiting_for_user`` (i.e. finished the previous task).
+    Each file group (alerts sharing the same filepath) gets its own Devin
+    session.  When a session finishes (reaches ``waiting_for_user`` or a
+    terminal state), it is archived and the next file group gets a fresh
+    session.  This avoids 403 errors from messaging finished sessions.
 
-    Flow:
-    1. Create a single session with the first file group
+    Flow per file group:
+    1. Create a new Devin session
     2. Poll until ``waiting_for_user`` or a hard terminal state
-    3. Detect new commits, record events
-    4. Send the next file group as a message to the same session
-    5. Repeat 2-4 until all file groups are done
+    3. Archive the session
+    4. Detect new commits, record events
+    5. Repeat for the next file group
     """
     if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
@@ -1485,7 +1486,7 @@ async def _benchmark_devin(
         detail=(
             f"Starting Devin remediation for {len(alerts)} alerts "
             f"across {len(file_groups)} files on {branch_name} "
-            f"(single session — alerts sent as follow-up messages)"
+            f"(one session per file group)"
         ),
         metadata={
             "repo": resolved_repo,
@@ -1498,8 +1499,7 @@ async def _benchmark_devin(
     db = await get_db()
     total_commits = 0
     failed = 0
-    session_id = ""
-    session_url = ""
+    total_sessions = 0
     # Track per-file-group info for the UI
     all_sessions: list[dict] = []  # {session_id, file_path, status, url}
 
@@ -1510,7 +1510,7 @@ async def _benchmark_devin(
         file_group_items = list(file_groups.items())
 
         for idx, (file_path, file_alerts) in enumerate(file_group_items):
-            # Check for cancellation before each task
+            # Check for cancellation before each file group
             if cancel_event and cancel_event.is_set():
                 await recorder.record(
                     tool="devin",
@@ -1520,92 +1520,49 @@ async def _benchmark_devin(
                 )
                 break
 
-            # -- Step 1: Create session (first group) or send message (subsequent) --
-            # Guard: if session creation failed at idx=0, can't send messages
-            if idx > 0 and not session_id:
-                logger.warning(
-                    "Benchmark %d: no session_id — skipping remaining %d group(s)",
-                    run_id, len(file_group_items) - idx,
-                )
-                failed += sum(len(fa) for _, fa in file_group_items[idx:])
-                break
+            # -- Step 1: Create a new session for this file group --
+            session_id = ""
+            session_url = ""
 
             try:
-                if idx == 0:
-                    # Create the single session with the first file group
-                    await recorder.record(
-                        tool="devin",
-                        event_type="session_created",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Creating Devin session "
-                            f"for {len(file_alerts)} alert(s) in {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "file_path": file_path,
-                            "alert_count": len(file_alerts),
-                            "alert_numbers": [a.number for a in file_alerts],
-                            "branch": branch_name,
-                            "group_index": idx + 1,
-                            "total_groups": len(file_group_items),
-                        },
+                await recorder.record(
+                    tool="devin",
+                    event_type="session_created",
+                    detail=(
+                        f"[{idx + 1}/{len(file_group_items)}] Creating Devin session "
+                        f"for {len(file_alerts)} alert(s) in {file_path}"
+                    ),
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "file_path": file_path,
+                        "alert_count": len(file_alerts),
+                        "alert_numbers": [a.number for a in file_alerts],
+                        "branch": branch_name,
+                        "group_index": idx + 1,
+                        "total_groups": len(file_group_items),
+                    },
+                )
+
+                if len(file_alerts) == 1:
+                    result = await devin.create_remediation_session(
+                        file_alerts[0], resolved_repo, branch_name,
                     )
-
-                    if len(file_alerts) == 1:
-                        result = await devin.create_remediation_session(
-                            file_alerts[0], resolved_repo, branch_name,
-                        )
-                    else:
-                        result = await devin.create_grouped_session(
-                            file_alerts, resolved_repo, branch_name,
-                        )
-                    session_id = result.get("session_id", "")
-                    session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
-
-                    for alert in file_alerts:
-                        await db.execute(
-                            """INSERT INTO devin_sessions
-                               (repo, session_id, alert_number, rule_id, file_path, status)
-                               VALUES (?, ?, ?, ?, ?, 'running')""",
-                            (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
-                        )
-                    await db.commit()
-
                 else:
-                    # Send the next file group as a follow-up message
-                    followup = devin.build_followup_message(
+                    result = await devin.create_grouped_session(
                         file_alerts, resolved_repo, branch_name,
                     )
-                    await devin.send_message(session_id, followup)
+                session_id = result.get("session_id", "")
+                session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
+                total_sessions += 1
 
-                    # Record DB rows for the new alert group (same session)
-                    for alert in file_alerts:
-                        await db.execute(
-                            """INSERT OR IGNORE INTO devin_sessions
-                               (repo, session_id, alert_number, rule_id, file_path, status)
-                               VALUES (?, ?, ?, ?, ?, 'running')""",
-                            (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
-                        )
-                    await db.commit()
-
-                    await recorder.record(
-                        tool="devin",
-                        event_type="message_sent",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Sent follow-up message "
-                            f"for {len(file_alerts)} alert(s) in {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "session_id": session_id,
-                            "session_url": session_url,
-                            "file_path": file_path,
-                            "alert_count": len(file_alerts),
-                            "alert_numbers": [a.number for a in file_alerts],
-                            "group_index": idx + 1,
-                            "total_groups": len(file_group_items),
-                        },
+                for alert in file_alerts:
+                    await db.execute(
+                        """INSERT INTO devin_sessions
+                           (repo, session_id, alert_number, rule_id, file_path, status)
+                           VALUES (?, ?, ?, ?, ?, 'running')""",
+                        (resolved_repo, session_id, alert.number, alert.rule_id, alert.file_path),
                     )
+                await db.commit()
 
                 # Track this file group in the UI list
                 all_sessions.append({
@@ -1615,29 +1572,28 @@ async def _benchmark_devin(
                     "url": session_url,
                 })
 
-                if idx == 0:
-                    await recorder.record(
-                        tool="devin",
-                        event_type="analyzing",
-                        detail=(
-                            f"[{idx + 1}/{len(file_group_items)}] Devin session started "
-                            f"for {file_path}"
-                        ),
-                        alert_number=file_alerts[0].number,
-                        metadata={
-                            "session_id": session_id,
-                            "session_url": session_url,
-                            "file_path": file_path,
-                            "branch": branch_name,
-                        },
-                    )
+                await recorder.record(
+                    tool="devin",
+                    event_type="analyzing",
+                    detail=(
+                        f"[{idx + 1}/{len(file_group_items)}] Devin session {session_id} "
+                        f"started for {file_path}"
+                    ),
+                    alert_number=file_alerts[0].number,
+                    metadata={
+                        "session_id": session_id,
+                        "session_url": session_url,
+                        "file_path": file_path,
+                        "branch": branch_name,
+                    },
+                )
 
             except Exception as e:
-                logger.exception("Benchmark devin: failed to create/message session for %s", file_path)
+                logger.exception("Benchmark devin: failed to create session for %s", file_path)
                 await recorder.record(
                     tool="devin",
                     event_type="error",
-                    detail=f"Failed to create/message session for {file_path}: {str(e)[:200]}",
+                    detail=f"Failed to create session for {file_path}: {str(e)[:200]}",
                     alert_number=file_alerts[0].number,
                     metadata={"error": str(e)[:500], "file_path": file_path},
                 )
@@ -1652,13 +1608,13 @@ async def _benchmark_devin(
             while not task_done:
                 if cancel_event and cancel_event.is_set():
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = "cancelled"
                     await db.execute(
                         """UPDATE devin_sessions
                            SET status = 'cancelled', updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
                     )
                     await db.commit()
                     await recorder.record(
@@ -1676,13 +1632,13 @@ async def _benchmark_devin(
                         run_id, session_id, elapsed, file_path,
                     )
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = "timeout"
                     await db.execute(
                         """UPDATE devin_sessions
                            SET status = 'timeout', updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (resolved_repo, session_id),
                     )
                     await db.commit()
                     await recorder.record(
@@ -1721,7 +1677,7 @@ async def _benchmark_devin(
                     if status in DEVIN_TERMINAL_STATES:
                         task_done = True
                         effective_status = status
-                    # waiting_for_user — Devin finished this task, ready for next
+                    # waiting_for_user — Devin finished this task
                     elif status_detail in DEVIN_TERMINAL_STATUS_DETAILS:
                         task_done = True
                         effective_status = f"{status}:{status_detail}"
@@ -1734,7 +1690,7 @@ async def _benchmark_devin(
 
                     # Update tracker for this file group
                     for s in all_sessions:
-                        if s["file_path"] == file_path:
+                        if s["session_id"] == session_id:
                             s["status"] = effective_status
                             s["url"] = session_url
 
@@ -1765,8 +1721,8 @@ async def _benchmark_devin(
                            SET status = ?, pr_url = ?,
                                acus = COALESCE(?, acus),
                                updated_at = datetime('now')
-                           WHERE repo = ? AND session_id = ? AND file_path = ?""",
-                        (effective_status, pr_url, acus, resolved_repo, session_id, file_path),
+                           WHERE repo = ? AND session_id = ?""",
+                        (effective_status, pr_url, acus, resolved_repo, session_id),
                     )
                     await db.commit()
 
@@ -1780,17 +1736,28 @@ async def _benchmark_devin(
                         session_id, e,
                     )
 
-            # -- Step 3: Detect new commits from this task --
-            # Run BEFORE the hard-terminal break so that commits from
-            # the current file group (including on "exit") are recorded.
+            # -- Step 3: Archive the session --
+            if session_id:
+                try:
+                    await devin.archive_session(session_id)
+                    logger.info(
+                        "Benchmark %d: archived Devin session %s for %s",
+                        run_id, session_id, file_path,
+                    )
+                except Exception as e:
+                    # Non-fatal — session may already be archived or in a terminal state
+                    logger.warning(
+                        "Benchmark devin: failed to archive session %s: %s",
+                        session_id, e,
+                    )
+
+            # -- Step 4: Detect new commits from this file group --
             try:
                 new_commits = await github.list_commits(
                     branch_name, since_sha=last_known_sha,
                 )
 
                 if new_commits:
-                    # Record one patch_applied per alert in this group
-                    # (so 3 alerts = 3 fixes, not 1)
                     for alert in file_alerts:
                         await recorder.record(
                             tool="devin",
@@ -1827,35 +1794,23 @@ async def _benchmark_devin(
                     metadata={"error": str(e)[:500], "session_id": session_id},
                 )
 
-            # If cancelled or hard terminal, stop processing further groups
+            # If cancelled, stop processing further groups
             if cancel_event and cancel_event.is_set():
-                break
-            if session_id and effective_status in ("error", "suspended", "exit", "unknown"):
-                # Session ended for real or timed out — can't send more messages
-                logger.warning(
-                    "Benchmark %d: Devin session %s reached terminal/timeout (%s), "
-                    "stopping at group %d/%d",
-                    run_id, session_id, effective_status, idx + 1, len(file_group_items),
-                )
-                failed += sum(
-                    len(fa) for _, fa in file_group_items[idx + 1:]
-                )
                 break
 
         await recorder.record(
             tool="devin",
             event_type="remediation_complete",
             detail=(
-                f"Devin complete: 1 session, "
+                f"Devin complete: {total_sessions} session(s), "
                 f"{total_commits} commit(s), {failed} failed "
                 f"out of {len(alerts)} alerts"
             ),
             metadata={
-                "session_id": session_id,
-                "session_url": session_url,
                 "commits": total_commits,
                 "failed": failed,
                 "total_alerts": len(alerts),
+                "total_sessions": total_sessions,
                 "file_count": len(file_groups),
                 "branch": branch_name,
                 "sessions": all_sessions,
@@ -2309,22 +2264,22 @@ async def cancel_benchmark(
     run_id: int,
     repo: str | None = Query(default=None, description="Repository (owner/repo)"),
 ) -> dict[str, str | int]:
-    """Cancel a running benchmark by setting its cancel event."""
+    """Cancel a running benchmark by setting its cancel event.
+
+    If the in-memory cancel event is not found (e.g. after server restart),
+    the DB status is still updated to 'cancelled' so the frontend reflects
+    the cancellation.
+    """
     cancel_event = _cancel_events.get(run_id)
-    if not cancel_event:
-        raise HTTPException(
-            status_code=404,
-            detail=f"No active benchmark found for run_id={run_id}",
-        )
+    if cancel_event:
+        cancel_event.set()
 
-    cancel_event.set()
-
-    # Update run status immediately
+    # Update run status immediately regardless of whether we found an in-memory event
     db = await get_db()
     try:
         now = datetime.now(timezone.utc).isoformat()
         await db.execute(
-            "UPDATE replay_runs SET status = 'cancelled', ended_at = ? WHERE id = ?",
+            "UPDATE replay_runs SET status = 'cancelled', ended_at = ? WHERE id = ? AND status = 'running'",
             (now, run_id),
         )
         await db.commit()
