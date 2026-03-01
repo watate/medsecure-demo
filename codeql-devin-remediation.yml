@@ -1,0 +1,243 @@
+# CodeQL + Devin Auto-Remediation GitHub Action
+#
+# ┌──────────────────────────────────────────────────────────────────┐
+# │  SETUP: Copy this file into .github/workflows/ in your repo.    │
+# │                                                                  │
+# │  Required repo secrets:                                          │
+# │    DEVIN_API_KEY  — Devin service-user token (starts with cog_)  │
+# │    DEVIN_ORG_ID   — Your Devin organization ID                   │
+# │                                                                  │
+# │  Optional repo secrets:                                          │
+# │    DEVIN_USER_ID  — Create sessions as this user so they appear  │
+# │                     in the Devin web app (requires the service   │
+# │                     user to have ImpersonateOrgSessions perm)    │
+# │                                                                  │
+# │  Prerequisites:                                                  │
+# │    - CodeQL must be enabled on the repo (code scanning alerts)   │
+# │    - Devin must have access to the repo (via GitHub app)         │
+# └──────────────────────────────────────────────────────────────────┘
+#
+# How it works:
+#   1. Fetches all open CodeQL alerts from the repo
+#   2. Groups alerts by file path (so related issues are fixed together)
+#   3. Creates one Devin session per file group (fire-and-forget)
+#   4. Each session creates a branch, fixes the issues, and opens a PR
+#   5. Logs session URLs in the GitHub Actions job summary
+#
+# Triggers:
+#   - Automatically every Monday at 9am UTC (configurable via cron)
+#   - Manually via the Actions tab (workflow_dispatch)
+
+name: "CodeQL Devin Remediation"
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      max_files_per_run:
+        description: "Max file groups to remediate per run"
+        required: false
+        default: "10"
+      max_acu_limit:
+        description: "ACU budget per Devin session"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+  security-events: read
+  actions: read
+
+jobs:
+  remediate:
+    name: "Fetch CodeQL alerts & launch Devin sessions"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Fetch alerts & create Devin sessions
+        uses: actions/github-script@v7
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          DEVIN_USER_ID: ${{ secrets.DEVIN_USER_ID }}
+          MAX_FILES: ${{ inputs.max_files_per_run || '10' }}
+          MAX_ACU: ${{ inputs.max_acu_limit || '5' }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const DEVIN_API_KEY = process.env.DEVIN_API_KEY;
+            const DEVIN_ORG_ID = process.env.DEVIN_ORG_ID;
+            const DEVIN_USER_ID = process.env.DEVIN_USER_ID || "";
+            const MAX_FILES = parseInt(process.env.MAX_FILES, 10);
+            const MAX_ACU = parseInt(process.env.MAX_ACU, 10);
+
+            if (!DEVIN_API_KEY || !DEVIN_ORG_ID) {
+              core.setFailed(
+                "DEVIN_API_KEY and DEVIN_ORG_ID secrets are required."
+              );
+              return;
+            }
+
+            const repo = context.repo;
+            const repoFullName = `${repo.owner}/${repo.repo}`;
+
+            // ── 1. Fetch open CodeQL alerts ───────────────────────────────
+            core.info(`Fetching open CodeQL alerts for ${repoFullName}...`);
+
+            let alerts = [];
+            let page = 1;
+            while (true) {
+              const { data } = await github.rest.codeScanning.listAlertsForRepo({
+                owner: repo.owner,
+                repo: repo.repo,
+                state: "open",
+                per_page: 100,
+                page,
+              });
+              alerts = alerts.concat(data);
+              if (data.length < 100) break;
+              page++;
+            }
+
+            if (alerts.length === 0) {
+              core.info("No open CodeQL alerts found. Nothing to do.");
+              return;
+            }
+            core.info(`Found ${alerts.length} open CodeQL alert(s).`);
+
+            // ── 2. Group alerts by file path ──────────────────────────────
+            const fileGroups = {};
+            for (const alert of alerts) {
+              const filePath =
+                alert.most_recent_instance?.location?.path || "unknown";
+              if (!fileGroups[filePath]) fileGroups[filePath] = [];
+              fileGroups[filePath].push(alert);
+            }
+
+            const filePaths = Object.keys(fileGroups).sort();
+            const selectedPaths = filePaths.slice(0, MAX_FILES);
+            core.info(
+              `Grouped into ${filePaths.length} file(s). ` +
+                `Processing ${selectedPaths.length} file group(s) this run.`
+            );
+
+            // ── 3. Create one Devin session per file group ────────────────
+            const sessions = [];
+
+            for (const filePath of selectedPaths) {
+              const fileAlerts = fileGroups[filePath];
+
+              const alertDetails = fileAlerts
+                .map((a) => {
+                  const loc = a.most_recent_instance?.location || {};
+                  return [
+                    `- Alert #${a.number}: ${a.rule?.id || "unknown"}`,
+                    `  Description: ${a.rule?.description || a.rule?.name || "N/A"}`,
+                    `  Severity: ${a.rule?.security_severity_level || a.rule?.severity || "N/A"}`,
+                    `  Lines: ${loc.start_line || "?"}-${loc.end_line || "?"}`,
+                    `  Message: ${a.most_recent_instance?.message?.text || "N/A"}`,
+                  ].join("\n");
+                })
+                .join("\n\n");
+
+              const alertNums = fileAlerts
+                .map((a) => `#${a.number}`)
+                .join(", ");
+              const branchSlug = filePath.replace(/[^a-zA-Z0-9]/g, "-");
+
+              const prompt = [
+                `Fix ${fileAlerts.length} CodeQL security finding(s) in \`${repoFullName}\`.`,
+                ``,
+                `All alerts are in: \`${filePath}\``,
+                ``,
+                alertDetails,
+                ``,
+                `Instructions:`,
+                `1. Clone the repo and checkout the default branch`,
+                `2. Create a new branch: \`remediate/codeql-${branchSlug}-${Date.now()}\``,
+                `3. Read \`${filePath}\` and understand the ${fileAlerts.length} issue(s) (alerts ${alertNums})`,
+                `4. Fix ALL security issues while preserving existing functionality`,
+                `5. Run any existing tests to verify nothing is broken`,
+                `6. Commit with a message referencing the alert numbers`,
+                `7. Push the branch and open a Pull Request targeting the default branch`,
+                `8. In the PR description, list each alert number and explain the fix`,
+                ``,
+                `Address root causes, not just suppress warnings.`,
+              ].join("\n");
+
+              const title = `Fix ${fileAlerts.length} CodeQL alert(s) in ${filePath}`;
+              core.info(`Creating Devin session: ${title}`);
+
+              // Build request body
+              const body = {
+                prompt,
+                title,
+                repos: [repoFullName],
+                max_acu_limit: MAX_ACU,
+                tags: ["codeql-remediation", "automated"],
+              };
+
+              // Impersonate a user so sessions show in the Devin web app
+              if (DEVIN_USER_ID) {
+                body.create_as_user_id = DEVIN_USER_ID;
+              }
+
+              const response = await fetch(
+                `https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions`,
+                {
+                  method: "POST",
+                  headers: {
+                    Authorization: `Bearer ${DEVIN_API_KEY}`,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify(body),
+                }
+              );
+
+              if (!response.ok) {
+                const errText = await response.text();
+                core.warning(
+                  `Failed to create session for ${filePath}: ${response.status} ${errText}`
+                );
+                continue;
+              }
+
+              const session = await response.json();
+              sessions.push({
+                session_id: session.session_id,
+                url: session.url,
+                filePath,
+                alertCount: fileAlerts.length,
+                alertNumbers: fileAlerts.map((a) => a.number),
+              });
+
+              core.info(`  Created: ${session.session_id} -> ${session.url}`);
+
+              // Rate-limit delay between session creation
+              await new Promise((r) => setTimeout(r, 2000));
+            }
+
+            if (sessions.length === 0) {
+              core.setFailed("No Devin sessions were created.");
+              return;
+            }
+
+            // ── 4. Generate job summary ───────────────────────────────────
+            let summary = `## CodeQL Devin Remediation\n\n`;
+            summary += `**${sessions.length}** Devin session(s) launched for **${repoFullName}**\n\n`;
+            summary += `| File | Alerts | Devin Session |\n`;
+            summary += `|------|--------|---------------|\n`;
+
+            for (const s of sessions) {
+              const nums = s.alertNumbers.join(", ");
+              summary += `| \`${s.filePath}\` | ${s.alertCount} (${nums}) | [${s.session_id}](${s.url}) |\n`;
+            }
+
+            summary += `\nEach session will create a branch, fix the issues, and open a PR.\n`;
+
+            core.summary.addRaw(summary);
+            await core.summary.write();
+
+            core.info("\n" + summary);
