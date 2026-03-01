@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-ENV_FILES=("$REPO_ROOT/backend/.env" "$REPO_ROOT/frontend/.env")
+ENV_FILES=("$REPO_ROOT/backend/.env" "$REPO_ROOT/frontend/.env" "$REPO_ROOT/infra/.env")
 PREFIX="/medsecure/prod"
 PROFILE="watate"
 REGION="us-east-1"
