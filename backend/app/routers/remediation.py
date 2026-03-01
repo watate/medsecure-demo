@@ -1659,8 +1659,23 @@ async def _benchmark_devin(
                 await asyncio.sleep(DEVIN_POLL_INTERVAL)
 
                 try:
+                    # Try get_session_status first (lighter, single-session call).
+                    # Fall back to list_sessions if status_detail is missing,
+                    # since the list endpoint reliably exposes it (needed to
+                    # detect "waiting_for_user").
                     status_data = await devin.get_session_status(session_id)
                     is_done, effective_status = _is_devin_session_done(status_data)
+
+                    if not is_done and "status_detail" not in status_data:
+                        # status_detail missing — fall back to list_sessions
+                        all_org_sessions = await devin.list_sessions()
+                        list_match = next(
+                            (s for s in all_org_sessions if s.get("session_id") == session_id),
+                            None,
+                        )
+                        if list_match is not None:
+                            status_data = list_match
+                            is_done, effective_status = _is_devin_session_done(status_data)
 
                     if not is_done:
                         continue  # Still running, keep polling

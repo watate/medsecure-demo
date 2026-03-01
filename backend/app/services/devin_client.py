@@ -133,7 +133,7 @@ class DevinClient:
             "title": title,
             "repos": [repo],
             "max_acu_limit": max_acu_limit,
-            "tags": tags or ["benchmark", "automated"],
+            "tags": tags or ["codeql-remediation", "automated"],
         }
 
         response = await self._request_with_retry(
