@@ -5,7 +5,7 @@ set -eo pipefail
 aws ssm get-parameters-by-path \
   --path "/medsecure/prod/" \
   --with-decryption \
-  --region ap-southeast-1 \
+  --region us-east-1 \
   --query "Parameters[*].[Name,Value]" \
   --output text | while read name value; do
     key=$(echo "$name" | sed 's|/medsecure/prod/||')

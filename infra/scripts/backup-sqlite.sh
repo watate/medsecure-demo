@@ -6,7 +6,7 @@ set -e
 
 DB_PATH="/data/medsecure.db"
 BUCKET=$(aws ssm get-parameter --name "/medsecure/prod/S3_BACKUP_BUCKET" --with-decryption --query "Parameter.Value" --output text 2>/dev/null || echo "")
-REGION="ap-southeast-1"
+REGION="us-east-1"
 
 if [ -z "$BUCKET" ]; then
   echo "S3_BACKUP_BUCKET not configured in SSM, skipping backup"

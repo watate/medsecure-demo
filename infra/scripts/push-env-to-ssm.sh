@@ -4,7 +4,7 @@ set -euo pipefail
 ENV_FILE="${1:-.env}"
 PREFIX="/medsecure/prod"
 PROFILE="watate"
-REGION="ap-southeast-1"
+REGION="us-east-1"
 
 if [ ! -f "$ENV_FILE" ]; then
   echo "Error: $ENV_FILE not found"
