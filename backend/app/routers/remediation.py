@@ -1683,6 +1683,10 @@ async def _benchmark_devin(
                     if not is_done:
                         continue  # Still running, keep polling
 
+                    # Mark done immediately so the loop exits even if
+                    # the DB/recorder operations below throw.
+                    session_done = True
+
                     acus = status_data.get("acus_consumed")
                     cost = compute_devin_session_cost(acus) if acus else 0.0
                     session_url = status_data.get("url", session_url)
@@ -1728,8 +1732,6 @@ async def _benchmark_devin(
                     # Count as failed if hard terminal error
                     if effective_status in ("error", "suspended"):
                         failed += len(file_alerts)
-
-                    session_done = True  # Mark done before break
 
                 except Exception as e:
                     logger.warning(
