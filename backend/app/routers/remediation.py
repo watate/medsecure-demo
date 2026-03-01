@@ -184,15 +184,9 @@ async def trigger_devin_remediation(
                     },
                 )
 
-                # Use grouped session if multiple alerts, single otherwise
-                if len(new_alerts) == 1:
-                    result = await devin.create_remediation_session(
-                        new_alerts[0], resolved_repo, branch_name,
-                    )
-                else:
-                    result = await devin.create_grouped_session(
-                        new_alerts, resolved_repo, branch_name,
-                    )
+                result = await devin.create_session(
+                    new_alerts, resolved_repo, branch_name,
+                )
                 session_id = result.get("session_id", "")
 
                 # Record a devin_sessions row per alert (all share same session_id)
@@ -784,8 +778,11 @@ async def refresh_devin_sessions(
                 sid = row["session_id"]
                 status_data = org_sessions_by_id.get(sid)
                 if status_data is None:
-                    # Fallback to single-session endpoint
-                    status_data = await devin.get_session_status(sid)
+                    # Session not found in list — may have been archived
+                    # or fallen off the page. Skip rather than calling
+                    # get_session_status (returns 403 for some service users).
+                    logger.info("Session %s not found in list_sessions, skipping refresh", sid)
+                    continue
 
                 # Use _is_devin_session_done to also detect waiting_for_user
                 _done, effective_status = _is_devin_session_done(status_data)
@@ -1428,6 +1425,10 @@ def _is_devin_session_done(status_data: dict) -> tuple[bool, str]:
     return False, status
 
 
+# Rate-limit delay between Devin session creations (mirrors workflow script)
+DEVIN_SESSION_CREATION_DELAY = 2.0  # seconds
+
+
 async def _benchmark_devin(
     run_id: int,
     alerts: list[Alert],
@@ -1439,17 +1440,21 @@ async def _benchmark_devin(
 ) -> None:
     """Background task: run Devin remediation with **one session per file group**.
 
-    Each file group (alerts sharing the same filepath) gets its own Devin
-    session.  When a session finishes (reaches ``waiting_for_user`` or a
-    terminal state), it is archived and the next file group gets a fresh
-    session.  This avoids 403 errors from messaging finished sessions.
+    Mirrors the CodeQL Devin Remediation workflow script pattern:
+    - One session per file group (alerts grouped by filepath)
+    - Sessions created sequentially — wait for session N to finish
+      before creating session N+1 (respects 5-concurrent-session limit)
+    - No archiving — sessions remain resumable
+    - Uses ``list_sessions`` for polling (the single-session endpoint
+      returns 403 for some service-user configs; ``list_sessions``
+      reliably includes ``status_detail``)
+    - Includes ``title``, ``max_acu_limit``, ``tags`` in session creation
 
     Flow per file group:
-    1. Create a new Devin session
-    2. Poll until ``waiting_for_user`` or a hard terminal state
-    3. Archive the session
-    4. Detect new commits, record events
-    5. Repeat for the next file group
+    1. Create a new Devin session (with title, max_acu_limit, tags)
+    2. Poll via ``list_sessions`` until done
+    3. Detect new commits, record events
+    4. Wait 2 s rate-limit delay, then repeat for the next file group
     """
     if not settings.devin_api_key or not settings.devin_org_id:
         recorder = await ReplayRecorder.attach(run_id, ["devin"], resolved_repo, start_time=start_time)
@@ -1486,7 +1491,7 @@ async def _benchmark_devin(
         detail=(
             f"Starting Devin remediation for {len(alerts)} alerts "
             f"across {len(file_groups)} files on {branch_name} "
-            f"(one session per file group)"
+            f"(sequential, one session per file group)"
         ),
         metadata={
             "repo": resolved_repo,
@@ -1500,7 +1505,6 @@ async def _benchmark_devin(
     total_commits = 0
     failed = 0
     total_sessions = 0
-    # Track per-file-group info for the UI
     all_sessions: list[dict] = []  # {session_id, file_path, status, url}
 
     try:
@@ -1510,7 +1514,7 @@ async def _benchmark_devin(
         file_group_items = list(file_groups.items())
 
         for idx, (file_path, file_alerts) in enumerate(file_group_items):
-            # Check for cancellation before each file group
+            # ── Check for cancellation before each file group ────────
             if cancel_event and cancel_event.is_set():
                 await recorder.record(
                     tool="devin",
@@ -1520,7 +1524,7 @@ async def _benchmark_devin(
                 )
                 break
 
-            # -- Step 1: Create a new session for this file group --
+            # ── Step 1: Create a new session for this file group ─────
             session_id = ""
             session_url = ""
 
@@ -1543,14 +1547,13 @@ async def _benchmark_devin(
                     },
                 )
 
-                if len(file_alerts) == 1:
-                    result = await devin.create_remediation_session(
-                        file_alerts[0], resolved_repo, branch_name,
-                    )
-                else:
-                    result = await devin.create_grouped_session(
-                        file_alerts, resolved_repo, branch_name,
-                    )
+                result = await devin.create_session(
+                    file_alerts,
+                    resolved_repo,
+                    branch_name,
+                    max_acu_limit=5,
+                    tags=["benchmark", "codeql-remediation", "automated"],
+                )
                 session_id = result.get("session_id", "")
                 session_url = result.get("url", f"https://app.devin.ai/sessions/{session_id}")
                 total_sessions += 1
@@ -1564,7 +1567,6 @@ async def _benchmark_devin(
                     )
                 await db.commit()
 
-                # Track this file group in the UI list
                 all_sessions.append({
                     "session_id": session_id,
                     "file_path": file_path,
@@ -1598,14 +1600,16 @@ async def _benchmark_devin(
                     metadata={"error": str(e)[:500], "file_path": file_path},
                 )
                 failed += len(file_alerts)
+                # Rate-limit delay even on failure before trying the next group
+                await asyncio.sleep(DEVIN_SESSION_CREATION_DELAY)
                 continue
 
-            # -- Step 2: Poll until waiting_for_user or hard terminal --
+            # ── Step 2: Poll via get_session_status until done ───────
             poll_start = _time.monotonic()
-            task_done = False
             effective_status = "unknown"
+            session_done = False
 
-            while not task_done:
+            while not session_done:
                 if cancel_event and cancel_event.is_set():
                     for s in all_sessions:
                         if s["session_id"] == session_id:
@@ -1623,6 +1627,7 @@ async def _benchmark_devin(
                         detail=f"Cancelled while polling session {session_id} for {file_path}",
                         metadata={"session_id": session_id, "file_path": file_path},
                     )
+                    session_done = True
                     break
 
                 elapsed = _time.monotonic() - poll_start
@@ -1656,33 +1661,37 @@ async def _benchmark_devin(
                         },
                     )
                     failed += len(file_alerts)
+                    session_done = True
                     break
 
                 await asyncio.sleep(DEVIN_POLL_INTERVAL)
 
                 try:
-                    # Use list_sessions which reliably returns status_detail
+                    # Use list_sessions to poll — the single-session endpoint
+                    # (get_session_status) returns 403 Unauthorized for some
+                    # service-user configurations, while list_sessions works
+                    # reliably and always includes status_detail (needed to
+                    # detect "waiting_for_user").
                     all_org_sessions = await devin.list_sessions()
                     status_data = next(
                         (s for s in all_org_sessions if s.get("session_id") == session_id),
                         None,
                     )
                     if status_data is None:
-                        status_data = await devin.get_session_status(session_id)
+                        logger.warning(
+                            "Benchmark devin: session %s not found in list_sessions",
+                            session_id,
+                        )
+                        continue  # Retry next poll cycle
 
-                    status = status_data.get("status", "unknown")
-                    status_detail = status_data.get("status_detail", "")
+                    is_done, effective_status = _is_devin_session_done(status_data)
 
-                    # Hard terminal states — session is completely done
-                    if status in DEVIN_TERMINAL_STATES:
-                        task_done = True
-                        effective_status = status
-                    # waiting_for_user — Devin finished this task
-                    elif status_detail in DEVIN_TERMINAL_STATUS_DETAILS:
-                        task_done = True
-                        effective_status = f"{status}:{status_detail}"
-                    else:
+                    if not is_done:
                         continue  # Still running, keep polling
+
+                    # Mark done immediately so the loop exits even if
+                    # the DB/recorder operations below throw.
+                    session_done = True
 
                     acus = status_data.get("acus_consumed")
                     cost = compute_devin_session_cost(acus) if acus else 0.0
@@ -1736,22 +1745,13 @@ async def _benchmark_devin(
                         session_id, e,
                     )
 
-            # -- Step 3: Archive the session --
-            if session_id:
-                try:
-                    await devin.archive_session(session_id)
-                    logger.info(
-                        "Benchmark %d: archived Devin session %s for %s",
-                        run_id, session_id, file_path,
-                    )
-                except Exception as e:
-                    # Non-fatal — session may already be archived or in a terminal state
-                    logger.warning(
-                        "Benchmark devin: failed to archive session %s: %s",
-                        session_id, e,
-                    )
+                # Exit polling loop once session is done, even if
+                # DB/recorder operations above threw an exception.
+                if session_done:
+                    break
 
-            # -- Step 4: Detect new commits from this file group --
+            # ── Step 3: Detect new commits from this file group ──────
+            # (No archiving — sessions remain resumable)
             try:
                 new_commits = await github.list_commits(
                     branch_name, since_sha=last_known_sha,
@@ -1797,6 +1797,10 @@ async def _benchmark_devin(
             # If cancelled, stop processing further groups
             if cancel_event and cancel_event.is_set():
                 break
+
+            # ── Rate-limit delay before creating the next session ────
+            if idx < len(file_group_items) - 1:
+                await asyncio.sleep(DEVIN_SESSION_CREATION_DELAY)
 
         await recorder.record(
             tool="devin",

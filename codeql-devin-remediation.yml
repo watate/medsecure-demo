@@ -1,11 +1,13 @@
-# CodeQL + Devin Auto-Remediation GitHub Action
+# CodeQL + Devin Auto-Remediation GitHub Action (Batch Mode)
 #
 # ┌──────────────────────────────────────────────────────────────────┐
 # │  SETUP: Copy this file into .github/workflows/ in your repo.    │
 # │                                                                  │
 # │  Required repo secrets:                                          │
-# │    DEVIN_API_KEY  — Devin service-user token (starts with cog_)  │
-# │    DEVIN_ORG_ID   — Your Devin organization ID                   │
+# │    DEVIN_API_KEY         — Devin service-user token (cog_…)      │
+# │    DEVIN_ORG_ID          — Your Devin organization ID            │
+# │    DEVIN_PLAYBOOK_ID     — Parent playbook ID (batch orchestr.)  │
+# │    DEVIN_CHILD_PLAYBOOK_ID — Child playbook ID (per-file fix)    │
 # │                                                                  │
 # │  Optional repo secrets:                                          │
 # │    DEVIN_USER_ID  — Create sessions as this user so they appear  │
@@ -19,12 +21,12 @@
 #
 # How it works:
 #   1. Fetches all open CodeQL alerts from the repo
-#   2. Sorts alerts by severity (critical → high → medium → low)
-#   3. Groups alerts by file path (so related issues are fixed together)
-#   4. Skips file groups that already have an open remediation PR
-#   5. Creates one Devin session per file group (fire-and-forget)
-#   6. Each session creates a branch, fixes the issues, and opens a PR
-#   7. Logs session URLs in the GitHub Actions job summary
+#   2. Filters alerts by minimum severity (if configured)
+#   3. Sorts alerts by severity (critical → high → medium → low)
+#   4. Builds a single prompt with all alerts organized by file
+#   5. Creates ONE Devin batch session that orchestrates child sessions
+#   6. Each child session creates a branch, fixes the issues, and opens a PR
+#   7. Logs the batch session URL in the GitHub Actions job summary
 #
 # Triggers:
 #   - Automatically every Monday at 9am UTC (configurable via cron)
@@ -38,12 +40,8 @@ on:
 
   workflow_dispatch:
     inputs:
-      max_files_per_run:
-        description: "Max file groups to remediate per run"
-        required: false
-        default: "10"
       max_acu_limit:
-        description: "ACU budget per Devin session"
+        description: "ACU budget for the entire batch session"
         required: false
         default: "5"
       severity_filter:
@@ -62,21 +60,21 @@ permissions:
   contents: read
   security-events: read
   actions: read
-  pull-requests: read
 
 jobs:
   remediate:
-    name: "Fetch CodeQL alerts & launch Devin sessions"
+    name: "Fetch CodeQL alerts & launch Devin batch session"
     runs-on: ubuntu-latest
 
     steps:
-      - name: Fetch alerts & create Devin sessions
+      - name: Fetch alerts & create Devin batch session
         uses: actions/github-script@v7
         env:
           DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
           DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
           DEVIN_USER_ID: ${{ secrets.DEVIN_USER_ID }}
-          MAX_FILES: ${{ inputs.max_files_per_run || '10' }}
+          DEVIN_PLAYBOOK_ID: ${{ secrets.DEVIN_PLAYBOOK_ID }}
+          DEVIN_CHILD_PLAYBOOK_ID: ${{ secrets.DEVIN_CHILD_PLAYBOOK_ID }}
           MAX_ACU: ${{ inputs.max_acu_limit || '5' }}
           SEVERITY_FILTER: ${{ inputs.severity_filter || 'all' }}
         with:
@@ -85,7 +83,8 @@ jobs:
             const DEVIN_API_KEY = process.env.DEVIN_API_KEY;
             const DEVIN_ORG_ID = process.env.DEVIN_ORG_ID;
             const DEVIN_USER_ID = process.env.DEVIN_USER_ID || "";
-            const MAX_FILES = parseInt(process.env.MAX_FILES, 10);
+            const DEVIN_PLAYBOOK_ID = process.env.DEVIN_PLAYBOOK_ID;
+            const DEVIN_CHILD_PLAYBOOK_ID = process.env.DEVIN_CHILD_PLAYBOOK_ID;
             const MAX_ACU = parseInt(process.env.MAX_ACU, 10);
             const SEVERITY_FILTER = process.env.SEVERITY_FILTER || "all";
 
@@ -110,6 +109,13 @@ jobs:
             if (!DEVIN_API_KEY || !DEVIN_ORG_ID) {
               core.setFailed(
                 "DEVIN_API_KEY and DEVIN_ORG_ID secrets are required."
+              );
+              return;
+            }
+
+            if (!DEVIN_PLAYBOOK_ID || !DEVIN_CHILD_PLAYBOOK_ID) {
+              core.setFailed(
+                "DEVIN_PLAYBOOK_ID and DEVIN_CHILD_PLAYBOOK_ID secrets are required."
               );
               return;
             }
@@ -164,9 +170,7 @@ jobs:
                 (SEVERITY_RANK[alertSeverity(b)] ?? 4)
             );
 
-            // ── 4. Group alerts by file path ────────────────────────────
-            // Using a Map preserves insertion order, so file groups whose
-            // highest-severity alert is most critical come first.
+            // ── 4. Group alerts by file path for the prompt ─────────────
             const fileGroups = new Map();
             for (const alert of alerts) {
               const filePath =
@@ -175,177 +179,100 @@ jobs:
               fileGroups.get(filePath).push(alert);
             }
 
-            // ── 5. Skip files that already have an open remediation PR ──
-            core.info("Checking for existing open remediation PRs...");
-            let existingPRBranches = new Set();
-            let prPage = 1;
-            while (true) {
-              const { data: prs } = await github.rest.pulls.list({
-                owner: repo.owner,
-                repo: repo.repo,
-                state: "open",
-                per_page: 100,
-                page: prPage,
-              });
-              for (const pr of prs) {
-                if (pr.head.ref.startsWith("remediate/codeql-")) {
-                  existingPRBranches.add(pr.head.ref);
+            const totalFiles = fileGroups.size;
+
+            // ── 5. Build a single prompt with all alerts ────────────────
+            let promptSections = [];
+            for (const [filePath, fileAlerts] of fileGroups) {
+              let section = `### \`${filePath}\` (${fileAlerts.length} alert${fileAlerts.length > 1 ? "s" : ""})\n`;
+              for (const a of fileAlerts) {
+                const loc = a.most_recent_instance?.location || {};
+                const sev = alertSeverity(a);
+                section += `- Alert #${a.number}: ${a.rule?.id || "unknown"} — ${a.rule?.description || a.rule?.name || "N/A"} — Severity: ${sev} — Lines: ${loc.start_line || "?"}-${loc.end_line || "?"}\n`;
+                if (a.most_recent_instance?.message?.text) {
+                  section += `  Message: ${a.most_recent_instance.message.text}\n`;
                 }
               }
-              if (prs.length < 100) break;
-              prPage++;
+              promptSections.push(section);
             }
 
-            const filePaths = [...fileGroups.keys()];
-            const candidatePaths = filePaths.filter((fp) => {
-              const slug = fp.replace(/[^a-zA-Z0-9]/g, "-");
-              // A file is already covered if any open PR branch matches
-              // the slug prefix (ignoring the timestamp suffix)
-              const slugPattern = new RegExp(
-                `^remediate/codeql-${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`
-              );
-              const alreadyCovered = [...existingPRBranches].some((branch) =>
-                slugPattern.test(branch)
-              );
-              if (alreadyCovered) {
-                core.info(`  Skipping ${fp} — open remediation PR already exists.`);
-              }
-              return !alreadyCovered;
-            });
+            const prompt = [
+              `Remediate ${alerts.length} CodeQL security alert${alerts.length > 1 ? "s" : ""} in \`${repoFullName}\`.`,
+              ``,
+              `## Alerts by File`,
+              ``,
+              promptSections.join("\n"),
+              `## Instructions`,
+              `For each file group, create a branch, fix ALL alerts in that file, run tests, and open a PR.`,
+              `Address root causes, not just suppress warnings.`,
+            ].join("\n");
 
-            const selectedPaths = candidatePaths.slice(0, MAX_FILES);
-            core.info(
-              `Grouped into ${filePaths.length} file(s), ` +
-                `${filePaths.length - candidatePaths.length} already have open PRs. ` +
-                `Processing ${selectedPaths.length} file group(s) this run.`
+            const title = `CodeQL Remediation: ${alerts.length} alert${alerts.length > 1 ? "s" : ""} across ${totalFiles} file${totalFiles > 1 ? "s" : ""}`;
+
+            // ── 6. Create ONE Devin batch session ───────────────────────
+            core.info(`Creating Devin batch session: ${title}`);
+
+            const body = {
+              prompt,
+              title,
+              advanced_mode: "batch",
+              playbook_id: DEVIN_PLAYBOOK_ID,
+              child_playbook_id: DEVIN_CHILD_PLAYBOOK_ID,
+              bypass_approval: true,
+              repos: [repoFullName],
+              max_acu_limit: MAX_ACU,
+              tags: ["codeql-remediation", "automated"],
+            };
+
+            if (DEVIN_USER_ID) {
+              body.create_as_user_id = DEVIN_USER_ID;
+            }
+
+            const response = await fetch(
+              `https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions`,
+              {
+                method: "POST",
+                headers: {
+                  Authorization: `Bearer ${DEVIN_API_KEY}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify(body),
+              }
             );
 
-            if (selectedPaths.length === 0) {
-              core.info("All file groups already have open remediation PRs. Nothing to do.");
-              return;
-            }
-
-            // ── 6. Create one Devin session per file group ──────────────
-            const sessions = [];
-
-            for (const filePath of selectedPaths) {
-              const fileAlerts = fileGroups.get(filePath);
-
-              const alertDetails = fileAlerts
-                .map((a) => {
-                  const loc = a.most_recent_instance?.location || {};
-                  return [
-                    `- Alert #${a.number}: ${a.rule?.id || "unknown"}`,
-                    `  Description: ${a.rule?.description || a.rule?.name || "N/A"}`,
-                    `  Severity: ${a.rule?.security_severity_level || a.rule?.severity || "N/A"}`,
-                    `  Lines: ${loc.start_line || "?"}-${loc.end_line || "?"}`,
-                    `  Message: ${a.most_recent_instance?.message?.text || "N/A"}`,
-                  ].join("\n");
-                })
-                .join("\n\n");
-
-              const alertNums = fileAlerts
-                .map((a) => `#${a.number}`)
-                .join(", ");
-              const branchSlug = filePath.replace(/[^a-zA-Z0-9]/g, "-");
-
-              const prompt = [
-                `Fix ${fileAlerts.length} CodeQL security finding(s) in \`${repoFullName}\`.`,
-                ``,
-                `All alerts are in: \`${filePath}\``,
-                ``,
-                alertDetails,
-                ``,
-                `Instructions:`,
-                `1. Clone the repo and checkout the default branch`,
-                `2. Create a new branch: \`remediate/codeql-${branchSlug}-${Date.now()}\``,
-                `3. Read \`${filePath}\` and understand the ${fileAlerts.length} issue(s) (alerts ${alertNums})`,
-                `4. Fix ALL security issues while preserving existing functionality`,
-                `5. Run any existing tests to verify nothing is broken`,
-                `6. Commit with a message referencing the alert numbers`,
-                `7. Push the branch and open a Pull Request targeting the default branch`,
-                `8. In the PR description, list each alert number and explain the fix`,
-                ``,
-                `Address root causes, not just suppress warnings.`,
-              ].join("\n");
-
-              const title = `Fix ${fileAlerts.length} CodeQL alert(s) in ${filePath}`;
-              core.info(`Creating Devin session: ${title}`);
-
-              // Build request body
-              const body = {
-                prompt,
-                title,
-                repos: [repoFullName],
-                max_acu_limit: MAX_ACU,
-                tags: ["codeql-remediation", "automated"],
-              };
-
-              // Impersonate a user so sessions show in the Devin web app
-              if (DEVIN_USER_ID) {
-                body.create_as_user_id = DEVIN_USER_ID;
-              }
-
-              const response = await fetch(
-                `https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions`,
-                {
-                  method: "POST",
-                  headers: {
-                    Authorization: `Bearer ${DEVIN_API_KEY}`,
-                    "Content-Type": "application/json",
-                  },
-                  body: JSON.stringify(body),
-                }
+            if (!response.ok) {
+              const errText = await response.text();
+              core.setFailed(
+                `Failed to create batch session: ${response.status} ${errText}`
               );
-
-              if (!response.ok) {
-                const errText = await response.text();
-                core.warning(
-                  `Failed to create session for ${filePath}: ${response.status} ${errText}`
-                );
-                continue;
-              }
-
-              const session = await response.json();
-              sessions.push({
-                session_id: session.session_id,
-                url: session.url,
-                filePath,
-                alertCount: fileAlerts.length,
-                alertNumbers: fileAlerts.map((a) => a.number),
-                severities: fileAlerts.map((a) => alertSeverity(a)),
-              });
-
-              core.info(`  Created: ${session.session_id} -> ${session.url}`);
-
-              // Rate-limit delay between session creation
-              await new Promise((r) => setTimeout(r, 2000));
-            }
-
-            if (sessions.length === 0) {
-              core.setFailed("No Devin sessions were created.");
               return;
             }
+
+            const session = await response.json();
+            core.info(`Batch session created: ${session.session_id} -> ${session.url}`);
 
             // ── 7. Generate job summary ───────────────────────────────────
-            const skippedCount = filePaths.length - candidatePaths.length;
-            let summary = `## CodeQL Devin Remediation\n\n`;
+            let summary = `## CodeQL Devin Remediation (Batch Mode)\n\n`;
             summary += `**Repository:** ${repoFullName}\n`;
             summary += `**Severity filter:** ${SEVERITY_FILTER}\n`;
-            summary += `**Alerts found:** ${alerts.length} | `;
-            summary += `**File groups:** ${filePaths.length} (${skippedCount} skipped — open PRs exist)\n`;
-            summary += `**Sessions launched:** ${sessions.length}\n\n`;
-            summary += `| File | Alerts | Severity | Devin Session |\n`;
-            summary += `|------|--------|----------|---------------|\n`;
+            summary += `**Total alerts:** ${alerts.length}\n`;
+            summary += `**Files affected:** ${totalFiles}\n\n`;
+            summary += `### Batch Session\n\n`;
+            summary += `| Session ID | URL |\n`;
+            summary += `|------------|-----|\n`;
+            summary += `| \`${session.session_id}\` | [Open in Devin](${session.url}) |\n\n`;
+            summary += `### Alert Breakdown\n\n`;
+            summary += `| File | Alerts | Severities |\n`;
+            summary += `|------|--------|------------|\n`;
 
-            for (const s of sessions) {
-              const nums = s.alertNumbers.join(", ");
-              const sevs = [...new Set(s.severities)].join(", ");
-              summary += `| \`${s.filePath}\` | ${s.alertCount} (${nums}) | ${sevs} | [${s.session_id}](${s.url}) |\n`;
+            for (const [filePath, fileAlerts] of fileGroups) {
+              const sevs = [...new Set(fileAlerts.map((a) => alertSeverity(a)))].join(", ");
+              const nums = fileAlerts.map((a) => `#${a.number}`).join(", ");
+              summary += `| \`${filePath}\` | ${fileAlerts.length} (${nums}) | ${sevs} |\n`;
             }
 
-            summary += `\nEach session will create a branch, fix the issues, and open a PR.\n`;
-            summary += `PRs opened by Devin will flow into your existing notification pipeline (GitHub, Slack, email).\n`;
+            summary += `\nDevin will split this into child sessions — one per file group.\n`;
+            summary += `Child sessions and their PRs will appear in the [Devin web app](${session.url}).\n`;
 
             core.summary.addRaw(summary);
             await core.summary.write();
