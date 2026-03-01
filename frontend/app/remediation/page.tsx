@@ -810,6 +810,7 @@ export default function RemediationPage() {
     setSetupCollapsed(true);
     setError(null);
     setLiveRun(null);
+    setSpotbugsResults([]);
 
     try {
       const result = await api.triggerBenchmark(
@@ -879,9 +880,14 @@ export default function RemediationPage() {
     setSetupCollapsed(false);
     setRunId(null);
     setLiveRun(null);
+    setSpotbugsResults([]);
     if (pollRef.current) {
       clearInterval(pollRef.current);
       pollRef.current = null;
+    }
+    if (spotbugsPollRef.current) {
+      clearInterval(spotbugsPollRef.current);
+      spotbugsPollRef.current = null;
     }
   };
 
@@ -1148,8 +1154,10 @@ export default function RemediationPage() {
                   const statusStyle =
                     result.workflow_conclusion === "failure"
                       ? { label: "Failed", className: "bg-red-100 text-red-700" }
-                      : SPOTBUGS_STATUS_STYLES[result.workflow_status] ||
-                        SPOTBUGS_STATUS_STYLES.error;
+                      : result.workflow_conclusion && result.workflow_conclusion !== "success"
+                        ? { label: result.workflow_conclusion.charAt(0).toUpperCase() + result.workflow_conclusion.slice(1), className: "bg-yellow-100 text-yellow-700" }
+                        : SPOTBUGS_STATUS_STYLES[result.workflow_status] ||
+                          SPOTBUGS_STATUS_STYLES.error;
                   return (
                     <div
                       key={`${result.tool}-${result.branch}`}
@@ -1210,9 +1218,14 @@ export default function RemediationPage() {
                               Artifact expired or unavailable
                             </span>
                           )}
-                          {result.workflow_conclusion !== "success" && (
+                          {result.workflow_conclusion === "failure" && (
                             <span className="text-xs text-muted-foreground">
                               The build failed before SpotBugs could run
+                            </span>
+                          )}
+                          {result.workflow_conclusion && result.workflow_conclusion !== "success" && result.workflow_conclusion !== "failure" && (
+                            <span className="text-xs text-muted-foreground">
+                              Workflow was {result.workflow_conclusion}
                             </span>
                           )}
                         </div>
