@@ -92,7 +92,6 @@ jobs:
             // Severity ranking: lower index = higher priority
             const SEVERITY_RANK = {
               critical: 0,
-              error: 1,
               high: 1,
               medium: 2,
               low: 3,
