@@ -19,10 +19,12 @@
 #
 # How it works:
 #   1. Fetches all open CodeQL alerts from the repo
-#   2. Groups alerts by file path (so related issues are fixed together)
-#   3. Creates one Devin session per file group (fire-and-forget)
-#   4. Each session creates a branch, fixes the issues, and opens a PR
-#   5. Logs session URLs in the GitHub Actions job summary
+#   2. Sorts alerts by severity (critical → high → medium → low)
+#   3. Groups alerts by file path (so related issues are fixed together)
+#   4. Skips file groups that already have an open remediation PR
+#   5. Creates one Devin session per file group (fire-and-forget)
+#   6. Each session creates a branch, fixes the issues, and opens a PR
+#   7. Logs session URLs in the GitHub Actions job summary
 #
 # Triggers:
 #   - Automatically every Monday at 9am UTC (configurable via cron)
@@ -44,11 +46,23 @@ on:
         description: "ACU budget per Devin session"
         required: false
         default: "5"
+      severity_filter:
+        description: "Minimum severity to process (critical, high, medium, low, all)"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - all
+          - critical
+          - high
+          - medium
+          - low
 
 permissions:
   contents: read
   security-events: read
   actions: read
+  pull-requests: read
 
 jobs:
   remediate:
@@ -64,6 +78,7 @@ jobs:
           DEVIN_USER_ID: ${{ secrets.DEVIN_USER_ID }}
           MAX_FILES: ${{ inputs.max_files_per_run || '10' }}
           MAX_ACU: ${{ inputs.max_acu_limit || '5' }}
+          SEVERITY_FILTER: ${{ inputs.severity_filter || 'all' }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -72,6 +87,26 @@ jobs:
             const DEVIN_USER_ID = process.env.DEVIN_USER_ID || "";
             const MAX_FILES = parseInt(process.env.MAX_FILES, 10);
             const MAX_ACU = parseInt(process.env.MAX_ACU, 10);
+            const SEVERITY_FILTER = process.env.SEVERITY_FILTER || "all";
+
+            // Severity ranking: lower index = higher priority
+            const SEVERITY_RANK = {
+              critical: 0,
+              error: 1,
+              high: 1,
+              medium: 2,
+              low: 3,
+              warning: 3,
+              note: 4,
+            };
+
+            function alertSeverity(alert) {
+              return (
+                alert.rule?.security_severity_level ||
+                alert.rule?.severity ||
+                "low"
+              ).toLowerCase();
+            }
 
             if (!DEVIN_API_KEY || !DEVIN_ORG_ID) {
               core.setFailed(
@@ -107,27 +142,95 @@ jobs:
             }
             core.info(`Found ${alerts.length} open CodeQL alert(s).`);
 
-            // ── 2. Group alerts by file path ──────────────────────────────
-            const fileGroups = {};
+            // ── 2. Filter by minimum severity ───────────────────────────
+            if (SEVERITY_FILTER !== "all") {
+              const minRank = SEVERITY_RANK[SEVERITY_FILTER] ?? 3;
+              const before = alerts.length;
+              alerts = alerts.filter(
+                (a) => (SEVERITY_RANK[alertSeverity(a)] ?? 4) <= minRank
+              );
+              core.info(
+                `Severity filter "${SEVERITY_FILTER}": ${before} → ${alerts.length} alert(s).`
+              );
+              if (alerts.length === 0) {
+                core.info("No alerts match the severity filter. Nothing to do.");
+                return;
+              }
+            }
+
+            // ── 3. Sort alerts by severity (critical first) ─────────────
+            alerts.sort(
+              (a, b) =>
+                (SEVERITY_RANK[alertSeverity(a)] ?? 4) -
+                (SEVERITY_RANK[alertSeverity(b)] ?? 4)
+            );
+
+            // ── 4. Group alerts by file path ────────────────────────────
+            // Using a Map preserves insertion order, so file groups whose
+            // highest-severity alert is most critical come first.
+            const fileGroups = new Map();
             for (const alert of alerts) {
               const filePath =
                 alert.most_recent_instance?.location?.path || "unknown";
-              if (!fileGroups[filePath]) fileGroups[filePath] = [];
-              fileGroups[filePath].push(alert);
+              if (!fileGroups.has(filePath)) fileGroups.set(filePath, []);
+              fileGroups.get(filePath).push(alert);
             }
 
-            const filePaths = Object.keys(fileGroups).sort();
-            const selectedPaths = filePaths.slice(0, MAX_FILES);
+            // ── 5. Skip files that already have an open remediation PR ──
+            core.info("Checking for existing open remediation PRs...");
+            let existingPRBranches = new Set();
+            let prPage = 1;
+            while (true) {
+              const { data: prs } = await github.rest.pulls.list({
+                owner: repo.owner,
+                repo: repo.repo,
+                state: "open",
+                per_page: 100,
+                page: prPage,
+              });
+              for (const pr of prs) {
+                if (pr.head.ref.startsWith("remediate/codeql-")) {
+                  existingPRBranches.add(pr.head.ref);
+                }
+              }
+              if (prs.length < 100) break;
+              prPage++;
+            }
+
+            const filePaths = [...fileGroups.keys()];
+            const candidatePaths = filePaths.filter((fp) => {
+              const slug = fp.replace(/[^a-zA-Z0-9]/g, "-");
+              // A file is already covered if any open PR branch matches
+              // the slug prefix (ignoring the timestamp suffix)
+              const slugPattern = new RegExp(
+                `^remediate/codeql-${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`
+              );
+              const alreadyCovered = [...existingPRBranches].some((branch) =>
+                slugPattern.test(branch)
+              );
+              if (alreadyCovered) {
+                core.info(`  Skipping ${fp} — open remediation PR already exists.`);
+              }
+              return !alreadyCovered;
+            });
+
+            const selectedPaths = candidatePaths.slice(0, MAX_FILES);
             core.info(
-              `Grouped into ${filePaths.length} file(s). ` +
+              `Grouped into ${filePaths.length} file(s), ` +
+                `${filePaths.length - candidatePaths.length} already have open PRs. ` +
                 `Processing ${selectedPaths.length} file group(s) this run.`
             );
 
-            // ── 3. Create one Devin session per file group ────────────────
+            if (selectedPaths.length === 0) {
+              core.info("All file groups already have open remediation PRs. Nothing to do.");
+              return;
+            }
+
+            // ── 6. Create one Devin session per file group ──────────────
             const sessions = [];
 
             for (const filePath of selectedPaths) {
-              const fileAlerts = fileGroups[filePath];
+              const fileAlerts = fileGroups.get(filePath);
 
               const alertDetails = fileAlerts
                 .map((a) => {
@@ -211,6 +314,7 @@ jobs:
                 filePath,
                 alertCount: fileAlerts.length,
                 alertNumbers: fileAlerts.map((a) => a.number),
+                severities: fileAlerts.map((a) => alertSeverity(a)),
               });
 
               core.info(`  Created: ${session.session_id} -> ${session.url}`);
@@ -224,18 +328,25 @@ jobs:
               return;
             }
 
-            // ── 4. Generate job summary ───────────────────────────────────
+            // ── 7. Generate job summary ───────────────────────────────────
+            const skippedCount = filePaths.length - candidatePaths.length;
             let summary = `## CodeQL Devin Remediation\n\n`;
-            summary += `**${sessions.length}** Devin session(s) launched for **${repoFullName}**\n\n`;
-            summary += `| File | Alerts | Devin Session |\n`;
-            summary += `|------|--------|---------------|\n`;
+            summary += `**Repository:** ${repoFullName}\n`;
+            summary += `**Severity filter:** ${SEVERITY_FILTER}\n`;
+            summary += `**Alerts found:** ${alerts.length} | `;
+            summary += `**File groups:** ${filePaths.length} (${skippedCount} skipped — open PRs exist)\n`;
+            summary += `**Sessions launched:** ${sessions.length}\n\n`;
+            summary += `| File | Alerts | Severity | Devin Session |\n`;
+            summary += `|------|--------|----------|---------------|\n`;
 
             for (const s of sessions) {
               const nums = s.alertNumbers.join(", ");
-              summary += `| \`${s.filePath}\` | ${s.alertCount} (${nums}) | [${s.session_id}](${s.url}) |\n`;
+              const sevs = [...new Set(s.severities)].join(", ");
+              summary += `| \`${s.filePath}\` | ${s.alertCount} (${nums}) | ${sevs} | [${s.session_id}](${s.url}) |\n`;
             }
 
             summary += `\nEach session will create a branch, fix the issues, and open a PR.\n`;
+            summary += `PRs opened by Devin will flow into your existing notification pipeline (GitHub, Slack, email).\n`;
 
             core.summary.addRaw(summary);
             await core.summary.write();
