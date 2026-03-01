@@ -40,7 +40,7 @@ if [ -n "$SEED_EMAIL" ] && [ -n "$SEED_PASSWORD" ]; then
   docker compose exec -T web node -e "
     fetch('http://localhost:3000/api/auth/sign-up/email', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json'},
+      headers: {'Content-Type': 'application/json', 'Origin': 'http://localhost:3000'},
       body: JSON.stringify({email:'${SEED_EMAIL}',password:'${SEED_PASSWORD}',name:'${SEED_NAME:-Admin}'})
     }).then(r=>r.text()).then(console.log).catch(console.error)
   " || true
