@@ -1192,6 +1192,26 @@ export default function RemediationPage() {
                           )}
                         </div>
                       </div>
+                      {/* Explicit Build Status */}
+                      {result.workflow_status === "completed" && (
+                        <div className="mt-2 flex items-center gap-2">
+                          {result.artifact_downloaded ? (
+                            <Badge className="bg-green-600 text-white text-xs">Build Passed</Badge>
+                          ) : (
+                            <Badge className="bg-red-600 text-white text-xs">Build Failed</Badge>
+                          )}
+                          {result.artifact_downloaded && result.bug_count != null && (
+                            <span className="text-xs text-muted-foreground">
+                              SpotBugs found {result.bug_count} issue{result.bug_count !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                          {!result.artifact_downloaded && (
+                            <span className="text-xs text-muted-foreground">
+                              No artifact produced &mdash; the build likely failed before SpotBugs could run
+                            </span>
+                          )}
+                        </div>
+                      )}
                       {result.error && (
                         <p className="mt-2 text-xs text-red-600">{result.error}</p>
                       )}
