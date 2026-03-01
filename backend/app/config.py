@@ -34,9 +34,6 @@ class Settings(BaseSettings):
     s3_backup_bucket: str = ""
     aws_region: str = "us-east-1"
 
-    # Auth — path to better-auth SQLite database
-    auth_db_path: str = "../frontend/auth.db"
-
     # CORS
     cors_origins: str = "http://localhost:3000"
 

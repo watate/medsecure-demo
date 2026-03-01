@@ -15,7 +15,6 @@ Supports: **Devin** (autonomous agent sessions), **Copilot Autofix** (GitHub-nat
 
 - **Backend**: FastAPI + SQLite — GitHub API integration, LLM orchestration, replay recording
 - **Frontend**: Next.js + shadcn/ui — dashboard, alert browser, remediation log, reports, replay timeline
-- **Auth**: [better-auth](https://www.better-auth.com/) with SQLite — email/password login, session cookies
 - **Infra**: Terraform (EC2 + S3), Docker Compose (Caddy + API + Web), GitHub Actions CI/CD
 
 ## Quick Start (Local)
@@ -54,20 +53,9 @@ cp backend/.env.example backend/.env
 
 # Frontend
 cp frontend/.env.example frontend/.env
-# Edit frontend/.env — set BETTER_AUTH_SECRET (generate with: openssl rand -hex 32)
 ```
 
-### 4. Set up auth
-
-```bash
-cd frontend
-npm install
-
-# Runs migrations + seeds a user (reads SEED_EMAIL/SEED_PASSWORD from frontend/.env)
-npm run setup
-```
-
-### 5. Run locally
+### 4. Run locally
 
 ```bash
 # Backend
@@ -77,10 +65,11 @@ uv run fastapi dev app/main.py
 
 # Frontend (separate terminal)
 cd frontend
-npm run dev
+pnpm install
+pnpm dev
 ```
 
-Open http://localhost:3000. Sign in with your seeded credentials, then click "Run New Scan" to fetch CodeQL alerts.
+Open http://localhost:3000 and click "Run New Scan" to fetch CodeQL alerts.
 
 <details>
 <summary><strong>Deploy to AWS (Optional)</strong></summary>
@@ -125,7 +114,7 @@ SQLite database is stored on a Docker volume at `/data/medsecure.db` and backed 
 
 ## API Endpoints
 
-All endpoints except `/api/health` require authentication (better-auth session cookie).
+All endpoints are unauthenticated.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -156,7 +145,6 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 |----------|----------|-------------|
 | `GITHUB_TOKEN` | Yes | GitHub PAT with code scanning access |
 | `DEVIN_API_KEY` | For remediation | Devin API key |
-| `AUTH_DB_PATH` | No | Path to better-auth SQLite database (default: `../frontend/auth.db`) |
 | `BATCH_SIZE` | No | Max file groups per batch in remediation (default: `10`) |
 | `CORS_ORIGINS` | No | Allowed origins (default: `http://localhost:3000`) |
 | `BRANCH_BASELINE` | No | Baseline branch (default: `main`) |
@@ -167,8 +155,6 @@ See `backend/.env.example` and `frontend/.env.example` for full reference.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `BETTER_AUTH_SECRET` | Yes | Random secret for encryption (`openssl rand -hex 32`) |
-| `BETTER_AUTH_URL` | Yes | Base URL of the frontend (e.g. `http://localhost:3000`) |
 | `NEXT_PUBLIC_API_URL` | No | Backend API URL (default: `http://localhost:8000`) |
 
 # References

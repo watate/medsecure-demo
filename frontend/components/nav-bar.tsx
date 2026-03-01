@@ -2,8 +2,6 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
-import { useSession, signOut } from "@/lib/auth-client";
 import { Button } from "@/components/ui/button";
 import { useRepo } from "@/lib/repo-context";
 import {
@@ -15,20 +13,7 @@ import {
 } from "@/components/ui/select";
 
 export function NavBar() {
-  const router = useRouter();
-  const pathname = usePathname();
-  const { data: session } = useSession();
   const { selectedRepo, setSelectedRepo, trackedRepos } = useRepo();
-
-  const handleSignOut = async () => {
-    await signOut();
-    router.push("/login");
-  };
-
-  // Hide nav bar on login page
-  if (pathname === "/login") {
-    return null;
-  }
 
   return (
     <nav className="border-b border-border bg-card">
@@ -59,7 +44,7 @@ export function NavBar() {
           </Link>
         </div>
 
-        {/* Right: repo selector + user */}
+        {/* Right: repo selector */}
         <div className="flex items-center gap-3">
           {trackedRepos.length > 0 ? (
             <Select
@@ -84,9 +69,6 @@ export function NavBar() {
               </Button>
             </Link>
           )}
-          <Button variant="outline" size="sm" onClick={handleSignOut}>
-            {session?.user?.email ? "Sign out [" + session.user.email.split("@")[0] + "]" : "Sign out"}
-          </Button>
         </div>
       </div>
     </nav>

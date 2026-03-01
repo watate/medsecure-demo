@@ -27,8 +27,6 @@ services:
       - "3000"
     env_file:
       - .env
-    environment:
-      - AUTH_DB_PATH=/app/data/auth.db
     volumes:
       - shared_data:/app/data
     restart: unless-stopped

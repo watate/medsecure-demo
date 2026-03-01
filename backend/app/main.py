@@ -2,13 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.models.schemas import HealthResponse
 from app.routers import alerts, config, remediation, replay, reports, repos, scans
-from app.services.auth import validate_session
 from app.services.database import init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,15 +40,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routers — all protected by session validation
-auth_dep = [Depends(validate_session)]
-app.include_router(repos.router, dependencies=auth_dep)
-app.include_router(scans.router, dependencies=auth_dep)
-app.include_router(alerts.router, dependencies=auth_dep)
-app.include_router(remediation.router, dependencies=auth_dep)
-app.include_router(reports.router, dependencies=auth_dep)
-app.include_router(replay.router, dependencies=auth_dep)
-app.include_router(config.router, dependencies=auth_dep)
+# Routers
+app.include_router(repos.router)
+app.include_router(scans.router)
+app.include_router(alerts.router)
+app.include_router(remediation.router)
+app.include_router(reports.router)
+app.include_router(replay.router)
+app.include_router(config.router)
 
 
 @app.get("/api/health", response_model=HealthResponse)
