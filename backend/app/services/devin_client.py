@@ -115,7 +115,7 @@ class DevinClient:
         repo: str,
         branch: str,
         *,
-        max_acu_limit: int = 5,
+        max_acu_limit: int | None = None,
         tags: list[str] | None = None,
     ) -> dict:
         """Create a Devin session to fix alerts in a single file.
@@ -132,9 +132,10 @@ class DevinClient:
             "prompt": prompt,
             "title": title,
             "repos": [repo],
-            "max_acu_limit": max_acu_limit,
             "tags": tags or ["codeql-remediation", "automated"],
         }
+        if max_acu_limit is not None:
+            body["max_acu_limit"] = max_acu_limit
 
         response = await self._request_with_retry(
             "POST",
