@@ -1445,12 +1445,14 @@ async def _benchmark_devin(
     - Sessions created sequentially — wait for session N to finish
       before creating session N+1 (respects 5-concurrent-session limit)
     - No archiving — sessions remain resumable
-    - Uses ``get_session_status`` for polling (lighter than ``list_sessions``)
+    - Uses ``list_sessions`` for polling (the single-session endpoint
+      returns 403 for some service-user configs; ``list_sessions``
+      reliably includes ``status_detail``)
     - Includes ``title``, ``max_acu_limit``, ``tags`` in session creation
 
     Flow per file group:
     1. Create a new Devin session (with title, max_acu_limit, tags)
-    2. Poll via ``get_session_status`` until done
+    2. Poll via ``list_sessions`` until done
     3. Detect new commits, record events
     4. Wait 2 s rate-limit delay, then repeat for the next file group
     """
