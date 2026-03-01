@@ -201,8 +201,11 @@ jobs:
               const slug = fp.replace(/[^a-zA-Z0-9]/g, "-");
               // A file is already covered if any open PR branch matches
               // the slug prefix (ignoring the timestamp suffix)
+              const slugPattern = new RegExp(
+                `^remediate/codeql-${slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-\\d+$`
+              );
               const alreadyCovered = [...existingPRBranches].some((branch) =>
-                branch.startsWith(`remediate/codeql-${slug}-`)
+                slugPattern.test(branch)
               );
               if (alreadyCovered) {
                 core.info(`  Skipping ${fp} — open remediation PR already exists.`);
