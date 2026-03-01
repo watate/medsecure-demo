@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     s3_backup_bucket: str = ""
     aws_region: str = "us-east-1"
 
+    # Domain (shared with Caddyfile)
+    domain: str = "localhost"
+
     # CORS
     cors_origins: str = "http://localhost:3000"
 

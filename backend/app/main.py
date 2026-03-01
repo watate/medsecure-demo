@@ -32,6 +32,12 @@ app = FastAPI(
 
 # CORS — allow dashboard frontend
 origins = settings.cors_origins.split(",") if settings.cors_origins != "*" else ["*"]
+# Auto-add the deployed domain so CORS works without manual CORS_ORIGINS config
+if settings.domain and settings.domain != "localhost":
+    for scheme in ("https://", "http://"):
+        domain_origin = f"{scheme}{settings.domain}"
+        if domain_origin not in origins:
+            origins.append(domain_origin)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
