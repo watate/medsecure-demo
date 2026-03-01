@@ -4,6 +4,8 @@
             DEVIN_ORG_ID (this is under Service Users)
           DEVIN_PLAYBOOK_ID (Playbooks -> Create team playbook, use parent-playbook.md)
           DEVIN_CHILD_PLAYBOOK_ID (Playbooks -> Create team playbook, use child-playbook.md)
-3. Add them to your GitHub repo with CLI `gh secret set <key>` or manually on GitHub
-4. Add `codeql-devin-remediation.yml` to the GitHub actions folder: `.github/workflows/`
+3. Add secrets to your GitHub repo with CLI `gh secret set <key>` or manually on GitHub
+3b. Add your repo to Devin (Repositories)
+3c. Configure Devin to run linters, tests, manage dependencies with Machine snapshot (under Machine configuration)
+4. Add `codeql-devin-remediation.yml` to the GitHub actions folder of your repo: `.github/workflows/`
 5. Run the workflow!
