@@ -843,9 +843,9 @@ export default function RemediationPage() {
 
   // Auto-load SpotBugs results when benchmark completes
   useEffect(() => {
-    if (!setupCollapsed || !selectedRepo) return;
+    if (!setupCollapsed || !selectedRepo || runId == null) return;
     loadSpotbugsResults();
-  }, [setupCollapsed, selectedRepo, loadSpotbugsResults]);
+  }, [setupCollapsed, selectedRepo, runId, loadSpotbugsResults]);
 
   // Poll SpotBugs while any workflows are still running
   useEffect(() => {
