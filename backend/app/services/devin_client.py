@@ -158,22 +158,25 @@ class DevinClient:
         )
         return response.json()
 
-    async def list_sessions(self) -> list[dict]:
-        """List all sessions for the organization.
+    async def list_sessions(self, *, limit: int = 100) -> list[dict]:
+        """List sessions for the organization.
 
-        GET /v3/organizations/{org_id}/sessions
+        GET /v3/organizations/{org_id}/sessions?limit={limit}
 
         Returns the ``items`` array from the response. Each item includes
         ``session_id``, ``status``, ``status_detail``, ``acus_consumed``,
         ``url``, ``pull_requests``, etc.
 
         This endpoint reliably exposes ``status_detail`` (e.g.
-        ``"waiting_for_user"``), which the single-session endpoint may omit.
+        ``"waiting_for_user"``), which the single-session endpoint
+        (``GET .../sessions/{devin_id}``) may return 403 for depending
+        on the service-user's permissions.
         """
         response = await self._request_with_retry(
             "GET",
             self._sessions_url,
             headers=self.headers,
+            params={"limit": limit},
         )
         data = response.json()
         return data.get("items", [])

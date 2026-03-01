@@ -778,8 +778,11 @@ async def refresh_devin_sessions(
                 sid = row["session_id"]
                 status_data = org_sessions_by_id.get(sid)
                 if status_data is None:
-                    # Fallback to single-session endpoint
-                    status_data = await devin.get_session_status(sid)
+                    # Session not found in list — may have been archived
+                    # or fallen off the page. Skip rather than calling
+                    # get_session_status (returns 403 for some service users).
+                    logger.info("Session %s not found in list_sessions, skipping refresh", sid)
+                    continue
 
                 # Use _is_devin_session_done to also detect waiting_for_user
                 _done, effective_status = _is_devin_session_done(status_data)
@@ -1662,23 +1665,24 @@ async def _benchmark_devin(
                 await asyncio.sleep(DEVIN_POLL_INTERVAL)
 
                 try:
-                    # Try get_session_status first (lighter, single-session call).
-                    # Fall back to list_sessions if status_detail is missing,
-                    # since the list endpoint reliably exposes it (needed to
+                    # Use list_sessions to poll — the single-session endpoint
+                    # (get_session_status) returns 403 Unauthorized for some
+                    # service-user configurations, while list_sessions works
+                    # reliably and always includes status_detail (needed to
                     # detect "waiting_for_user").
-                    status_data = await devin.get_session_status(session_id)
-                    is_done, effective_status = _is_devin_session_done(status_data)
-
-                    if not is_done and "status_detail" not in status_data:
-                        # status_detail missing — fall back to list_sessions
-                        all_org_sessions = await devin.list_sessions()
-                        list_match = next(
-                            (s for s in all_org_sessions if s.get("session_id") == session_id),
-                            None,
+                    all_org_sessions = await devin.list_sessions()
+                    status_data = next(
+                        (s for s in all_org_sessions if s.get("session_id") == session_id),
+                        None,
+                    )
+                    if status_data is None:
+                        logger.warning(
+                            "Benchmark devin: session %s not found in list_sessions",
+                            session_id,
                         )
-                        if list_match is not None:
-                            status_data = list_match
-                            is_done, effective_status = _is_devin_session_done(status_data)
+                        continue  # Retry next poll cycle
+
+                    is_done, effective_status = _is_devin_session_done(status_data)
 
                     if not is_done:
                         continue  # Still running, keep polling
