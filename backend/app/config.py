@@ -32,7 +32,7 @@ class Settings(BaseSettings):
 
     # S3 backup
     s3_backup_bucket: str = ""
-    aws_region: str = "ap-southeast-1"
+    aws_region: str = "us-east-1"
 
     # Auth — path to better-auth SQLite database
     auth_db_path: str = "../frontend/auth.db"
