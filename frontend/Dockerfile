@@ -19,6 +19,9 @@ COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
+# Empty string = use relative URLs (same origin via Caddy reverse proxy)
+ARG NEXT_PUBLIC_API_URL=""
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
 
 RUN \
   if [ -f yarn.lock ]; then yarn build; \
