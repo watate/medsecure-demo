@@ -65,8 +65,8 @@ uv run fastapi dev app/main.py
 
 # Frontend (separate terminal)
 cd frontend
-pnpm install
-pnpm dev
+npm install
+npm dev
 ```
 
 Open http://localhost:3000 and click "Run New Scan" to fetch CodeQL alerts.
